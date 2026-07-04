@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 通知专用小图标，单色 vector drawable -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFF">
+    <!-- 简化木鱼形状：一个圆角矩形 + 两条横线 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M7,5h10a2,2 0,0 1,2 2v10a2,2 0,0 1,-2 2H7a2,2 0,0 1,-2 -2V7a2,2 0,0 1,2 -2z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10,10h4v1h-4z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10,13h4v1h-4z" />
+</vector>

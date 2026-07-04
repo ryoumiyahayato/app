@@ -1,0 +1,11 @@
+.gradle/
+build/
+app/build/
+local.properties
+build_log*.txt
+gradle_build*.log
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+server/node_modules/

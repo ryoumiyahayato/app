@@ -6,14 +6,14 @@ plugins {
 
 android {
     namespace = "app.electronicmuyu.android"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "app.electronicmuyu.android"
         minSdk = 26
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "0.5.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -71,6 +71,10 @@ dependencies {
 
     // Navigation
     implementation(libs.androidx.navigation.compose)
+
+    // Lifecycle Process (for ProcessLifecycleOwner)
+    implementation(libs.androidx.lifecycle.process)
+
 
     // DataStore
     implementation(libs.androidx.datastore.preferences)
