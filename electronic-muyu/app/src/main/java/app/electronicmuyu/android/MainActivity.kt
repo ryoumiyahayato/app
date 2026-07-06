@@ -102,6 +102,9 @@ fun MuyuApp(
     val lastReconnectResult by viewModel.lastReconnectResult.collectAsState()
     val isServiceRunning by viewModel.isServiceRunning.collectAsState()
     val foregroundNotificationText by viewModel.foregroundNotificationText.collectAsState()
+    val serverUrl by viewModel.serverUrl.collectAsState()
+    val roomId by viewModel.roomId.collectAsState()
+    val deviceIdDisplay by viewModel.deviceIdDisplay.collectAsState()
 
     val navController = rememberNavController()
 
@@ -144,6 +147,9 @@ fun MuyuApp(
                 lastReconnectResult = lastReconnectResult,
                 isServiceRunning = isServiceRunning,
                 foregroundNotificationText = foregroundNotificationText,
+                serverUrl = serverUrl,
+                roomId = roomId,
+                deviceIdDisplay = deviceIdDisplay,
                 onSoundToggle = { viewModel.setSoundEnabled(it) },
                 onVibrationToggle = { viewModel.setVibrationEnabled(it) },
                 onNotificationToggle = { enabled ->
@@ -187,6 +193,8 @@ fun MuyuApp(
                 },
                 onConnect = { viewModel.startConnection() },
                 onDisconnect = { viewModel.stopConnection() },
+                onSaveConfig = { serverUrl, roomId -> viewModel.saveConnectionConfig(serverUrl, roomId) },
+                onResetDefaults = { viewModel.resetConnectionConfig() },
                 onClearCounts = { viewModel.clearAllCounts() },
                 onNavigateBack = { navController.popBackStack() }
             )

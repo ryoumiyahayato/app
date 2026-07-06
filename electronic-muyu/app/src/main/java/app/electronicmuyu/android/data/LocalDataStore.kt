@@ -21,6 +21,7 @@ class LocalDataStore(private val context: Context) {
         private val KEY_NOTIFICATION_ENABLED = booleanPreferencesKey("notification_enabled")
         private val KEY_DEVICE_ID = stringPreferencesKey("device_id")
         private val KEY_WS_URL = stringPreferencesKey("ws_url")
+        private val KEY_ROOM_ID = stringPreferencesKey("room_id")
     }
 
     val meriCount: Flow<Int> = context.dataStore.data.map { prefs ->
@@ -50,6 +51,10 @@ class LocalDataStore(private val context: Context) {
 
     val wsUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[KEY_WS_URL] ?: ""
+    }
+
+    val roomId: Flow<String> = context.dataStore.data.map { prefs ->
+        prefs[KEY_ROOM_ID] ?: ""
     }
 
     suspend fun setMeriCount(count: Int) {
@@ -92,6 +97,12 @@ class LocalDataStore(private val context: Context) {
     suspend fun setWsUrl(url: String) {
         context.dataStore.edit { prefs ->
             prefs[KEY_WS_URL] = url
+        }
+    }
+
+    suspend fun setRoomId(roomId: String) {
+        context.dataStore.edit { prefs ->
+            prefs[KEY_ROOM_ID] = roomId
         }
     }
 

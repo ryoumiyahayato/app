@@ -22,12 +22,18 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -54,6 +60,9 @@ fun SettingsScreen(
     lastReconnectResult: String,
     isServiceRunning: Boolean,
     foregroundNotificationText: String,
+    serverUrl: String,
+    roomId: String,
+    deviceIdDisplay: String,
     onSoundToggle: (Boolean) -> Unit,
     onVibrationToggle: (Boolean) -> Unit,
     onNotificationToggle: (Boolean) -> Unit,
@@ -61,6 +70,8 @@ fun SettingsScreen(
     onSendTestNotification: () -> Unit = {},
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
+    onSaveConfig: (serverUrl: String, roomId: String) -> Unit,
+    onResetDefaults: () -> Unit,
     onClearCounts: () -> Unit,
     onNavigateBack: () -> Unit
 ) {
@@ -221,6 +232,17 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Connection config section (Phase 5A)
+            ConnectionConfigCard(
+                serverUrl = serverUrl,
+                roomId = roomId,
+                deviceIdDisplay = deviceIdDisplay,
+                onSaveConfig = onSaveConfig,
+                onResetDefaults = onResetDefaults
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             // Connection section (Phase 3)
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -370,7 +392,7 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodyLarge
                     )
                     Text(
-                        text = "版本 0.5.1 — 前台服务连接 MVP",
+                        text = "版本 0.6.0 — 连接配置 MVP",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -390,6 +412,147 @@ fun SettingsScreen(
             }
 
             Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+private fun ConnectionConfigCard(
+    serverUrl: String,
+    roomId: String,
+    deviceIdDisplay: String,
+    onSaveConfig: (serverUrl: String, roomId: String) -> Unit,
+    onResetDefaults: () -> Unit
+) {
+    var localServerUrl by remember(serverUrl) { mutableStateOf(serverUrl) }
+    var localRoomId by remember(roomId) { mutableStateOf(roomId) }
+    var serverUrlError by remember { mutableStateOf<String?>(null) }
+    var roomIdError by remember { mutableStateOf<String?>(null) }
+    var savedMessage by remember { mutableStateOf<String?>(null) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Text(
+                text = "连接配置",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+
+            OutlinedTextField(
+                value = localServerUrl,
+                onValueChange = {
+                    localServerUrl = it
+                    serverUrlError = null
+                    savedMessage = null
+                },
+                label = { Text("服务器地址") },
+                placeholder = { Text("ws://192.168.96.33:8443") },
+                singleLine = true,
+                isError = serverUrlError != null,
+                supportingText = serverUrlError?.let { { Text(it) } },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = localRoomId,
+                onValueChange = {
+                    localRoomId = it
+                    roomIdError = null
+                    savedMessage = null
+                },
+                label = { Text("房间 ID") },
+                placeholder = { Text("test-room") },
+                singleLine = true,
+                isError = roomIdError != null,
+                supportingText = roomIdError?.let { { Text(it) } },
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "设备 ID: $deviceIdDisplay",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+                onClick = {
+                    var hasError = false
+                    if (localServerUrl.isBlank()) {
+                        serverUrlError = "服务器地址不能为空"
+                        hasError = true
+                    } else if (!localServerUrl.startsWith("ws://") && !localServerUrl.startsWith("wss://")) {
+                        serverUrlError = "必须以 ws:// 或 wss:// 开头"
+                        hasError = true
+                    } else {
+                        serverUrlError = null
+                    }
+                    if (localRoomId.isBlank()) {
+                        roomIdError = "房间 ID 不能为空"
+                        hasError = true
+                    } else {
+                        roomIdError = null
+                    }
+                    if (!hasError) {
+                        onSaveConfig(localServerUrl, localRoomId)
+                        savedMessage = "配置已保存"
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("保存配置")
+            }
+
+            if (savedMessage != null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = savedMessage!!,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF4CAF50)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "修改配置后，请断开并重新连接以生效",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = {
+                    localServerUrl = "ws://192.168.96.33:8443"
+                    localRoomId = "test-room"
+                    serverUrlError = null
+                    roomIdError = null
+                    savedMessage = null
+                    onResetDefaults()
+                },
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("恢复默认")
+            }
         }
     }
 }

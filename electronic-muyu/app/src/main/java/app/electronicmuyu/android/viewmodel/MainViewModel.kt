@@ -49,6 +49,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _deviceId = MutableStateFlow("")
     val deviceId: StateFlow<String> = _deviceId.asStateFlow()
 
+    private val _deviceIdDisplay = MutableStateFlow("")
+    val deviceIdDisplay: StateFlow<String> = _deviceIdDisplay.asStateFlow()
+
+    private val _serverUrl = MutableStateFlow(DEFAULT_SERVER_URL)
+    val serverUrl: StateFlow<String> = _serverUrl.asStateFlow()
+
+    private val _roomId = MutableStateFlow(DEFAULT_ROOM_ID)
+    val roomId: StateFlow<String> = _roomId.asStateFlow()
+
     private val _lastTappedTime = MutableStateFlow<Long?>(null)
     val lastTappedTime: StateFlow<Long?> = _lastTappedTime.asStateFlow()
 
@@ -81,9 +90,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isAppInForeground: StateFlow<Boolean> = _isAppInForeground.asStateFlow()
 
     companion object {
+        const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
+        const val DEFAULT_ROOM_ID = "test-room"
         private const val TAG = "ElectronicMuyu"
-        private const val DEFAULT_WS_URL = "ws://192.168.96.33:8443?room=test-room"
-        private const val DEFAULT_PAIR_ID = "test-room"
     }
 
     private val processLifecycleObserver = LifecycleEventObserver { _, event ->
@@ -126,10 +135,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (savedId.isEmpty()) {
                     val newId = UUID.randomUUID().toString()
                     _deviceId.value = newId
+                    _deviceIdDisplay.value = newId.take(8)
                     localDataStore.setDeviceId(newId)
                 } else {
                     _deviceId.value = savedId
+                    _deviceIdDisplay.value = savedId.take(8)
                 }
+            }
+        }
+        viewModelScope.launch {
+            localDataStore.wsUrl.collect { savedUrl ->
+                _serverUrl.value = savedUrl.ifEmpty { DEFAULT_SERVER_URL }
+            }
+        }
+        viewModelScope.launch {
+            localDataStore.roomId.collect { savedRoomId ->
+                _roomId.value = savedRoomId.ifEmpty { DEFAULT_ROOM_ID }
             }
         }
         viewModelScope.launch {
@@ -150,7 +171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startConnection(url: String? = null) {
+    fun startConnection() {
         val deviceIdVal = _deviceId.value
         if (deviceIdVal.isEmpty()) {
             MuyuConnectionRepository.setDisconnectReason(
@@ -160,14 +181,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        val serverUrlVal = _serverUrl.value
+        val roomIdVal = _roomId.value
+        val fullUrl = "${serverUrlVal}?room=${roomIdVal}"
+
         _wsEnabled.value = true
         MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
 
         val context = getApplication<Application>()
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_START_CONNECT
-            putExtra(MuyuForegroundService.EXTRA_SERVER_URL, url ?: DEFAULT_WS_URL)
-            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, DEFAULT_PAIR_ID)
+            putExtra(MuyuForegroundService.EXTRA_SERVER_URL, fullUrl)
+            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdVal)
             putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdVal)
         }
         ContextCompat.startForegroundService(context, intent)
@@ -221,6 +246,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _notificationEnabled.value = enabled
             localDataStore.setNotificationEnabled(enabled)
+        }
+    }
+
+    fun saveConnectionConfig(serverUrl: String, roomId: String) {
+        viewModelScope.launch {
+            localDataStore.setWsUrl(serverUrl)
+            localDataStore.setRoomId(roomId)
+        }
+    }
+
+    fun resetConnectionConfig() {
+        viewModelScope.launch {
+            localDataStore.setWsUrl("")
+            localDataStore.setRoomId("")
         }
     }
 
