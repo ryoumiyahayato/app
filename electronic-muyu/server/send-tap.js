@@ -4,32 +4,43 @@
  * 用法：
  *   node send-tap.js
  *
- * 作用：
- *   连接本地中继，向 test-room 发送一次 tap，然后退出。
- *   用于验证 电脑脚本 → Node 中继 → Android 手机 通路。
+ * 环境变量（可选）：
+ *   WS_URL=ws://localhost:8443        # 服务器地址
+ *   ROOM_ID=test-room                  # 房间 ID
+ *   DEVICE_ID=test-client              # 设备标识
+ *
+ * 示例：
+ *   node send-tap.js
+ *   $env:ROOM_ID="test-room-2"; node send-tap.js
+ *   $env:WS_URL="wss://example.com"; $env:ROOM_ID="test-room"; node send-tap.js
  */
 
 const WebSocket = require('ws');
 
-const WS_URL = 'ws://localhost:8443?room=test-room';
-const ws = new WebSocket(WS_URL);
+const WS_URL = process.env.WS_URL || 'ws://localhost:8443';
+const ROOM_ID = process.env.ROOM_ID || 'test-room';
+const DEVICE_ID = process.env.DEVICE_ID || 'test-client';
+
+const url = `${WS_URL}?room=${ROOM_ID}`;
+const ws = new WebSocket(url);
+
+console.log(`[send-tap] 连接 ${url} ...`);
 
 ws.on('open', () => {
     console.log('[send-tap] 已连接');
 
     const tap = {
         type: 'tap',
-        pairId: 'test-room',
-        deviceId: 'test-client',
+        pairId: ROOM_ID,
+        deviceId: DEVICE_ID,
         timestamp: Date.now()
     };
 
     ws.send(JSON.stringify(tap));
-    console.log('[send-tap] 已发送 tap');
+    console.log(`[send-tap] 已发送 tap (room=${ROOM_ID} deviceId=${DEVICE_ID})`);
 });
 
 ws.on('message', (data) => {
-    // 忽略 room_info 等回应消息
     const parsed = JSON.parse(data.toString());
     if (parsed.type === 'room_info') {
         console.log(`[send-tap] room=${parsed.room} connections=${parsed.connections}`);
@@ -46,7 +57,6 @@ ws.on('error', (err) => {
     process.exit(1);
 });
 
-// 发送后等 1 秒再关闭退出
 setTimeout(() => {
     ws.close();
 }, 1000);

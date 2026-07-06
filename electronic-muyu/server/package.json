@@ -5,7 +5,8 @@
   "description": "本地开发测试用的 WSS 中转服务 — 不做生产用途",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "send": "node send-tap.js"
   },
   "dependencies": {
     "ws": "^8.16.0"
