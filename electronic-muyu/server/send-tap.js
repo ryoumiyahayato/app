@@ -5,6 +5,7 @@
  *   WS_URL=ws://localhost:8443
  *   ROOM_ID=test-room
  *   DEVICE_ID=test-client
+ *   RELAY_TOKEN=optional-local-test-token
  */
 
 const WebSocket = require('ws');
@@ -13,6 +14,7 @@ const crypto = require('crypto');
 const WS_URL = process.env.WS_URL || 'ws://localhost:8443';
 const ROOM_ID = (process.env.ROOM_ID || 'test-room').trim();
 const DEVICE_ID = (process.env.DEVICE_ID || 'test-client').trim();
+const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const TIMEOUT_MS = 5_000;
 
 function maskDeviceId(deviceId) {
@@ -37,6 +39,9 @@ function validateConfig() {
         throw new Error('WS_URL 必须使用 ws:// 或 wss://');
     }
     targetUrl.searchParams.set('room', ROOM_ID);
+    if (RELAY_TOKEN) {
+        targetUrl.searchParams.set('token', RELAY_TOKEN);
+    }
     return targetUrl;
 }
 
@@ -55,7 +60,7 @@ let finished = false;
 
 console.log(
     `[send-tap] 连接 ${safeUrlForLog} roomHash=${roomHash(ROOM_ID)} `
-    + `deviceId=${maskDeviceId(DEVICE_ID)} ...`
+    + `deviceId=${maskDeviceId(DEVICE_ID)} auth=${RELAY_TOKEN ? 'enabled' : 'disabled'} ...`
 );
 
 const timeout = setTimeout(() => {
