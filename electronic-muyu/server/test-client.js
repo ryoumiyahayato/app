@@ -7,6 +7,7 @@
  *
  * 环境变量：
  *   WS_URL=ws://localhost:8443
+ *   RELAY_TOKEN=optional-local-test-token
  */
 
 const WebSocket = require('ws');
@@ -14,6 +15,7 @@ const readline = require('readline');
 const crypto = require('crypto');
 
 const SERVER = process.env.WS_URL || 'ws://localhost:8443';
+const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const room = (process.argv[2] || 'test-room').trim();
 const deviceId = `test-client-${process.pid}`;
 const ACCEPT_TIMEOUT_MS = 5_000;
@@ -27,6 +29,9 @@ function buildTargetUrl() {
         throw new Error('WS_URL 必须使用 ws:// 或 wss://');
     }
     target.searchParams.set('room', room);
+    if (RELAY_TOKEN) {
+        target.searchParams.set('token', RELAY_TOKEN);
+    }
     return target;
 }
 
@@ -68,7 +73,8 @@ const acceptTimer = setTimeout(() => {
 
 console.log(
     `[test-client] 连接 ${targetUrl.protocol}//${targetUrl.host}${targetUrl.pathname} `
-    + `roomHash=${shortHash(room)} deviceId=${maskDeviceId(deviceId)}`
+    + `roomHash=${shortHash(room)} deviceId=${maskDeviceId(deviceId)} `
+    + `auth=${RELAY_TOKEN ? 'enabled' : 'disabled'}`
 );
 console.log('[test-client] relay 接受连接后，按 Enter 发送 tap；输入 q 后回车退出');
 
