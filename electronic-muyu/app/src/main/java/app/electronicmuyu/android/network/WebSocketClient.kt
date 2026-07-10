@@ -15,18 +15,18 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
- * 阶段 3 WSS 客户端 — 仅用于本地开发测试
+ * 阶段 3 WSS 客户端
  *
  * 功能：
- * - 连接指定的 WSS URL（ws:// 本地测试）
- * - 发送 tap 事件
- * - 接收 tap 事件，通过回调通知上层
+ * - 连接指定的 WebSocket URL
+ * - 发送和接收 tap
  * - 断线自动重连（指数退避，上限 60s）
  *
- * ⚠️ 正式环境必须使用 wss://
+ * 公网长期使用必须切换到 wss://。
  */
 class WebSocketClient(
     private val scope: CoroutineScope
@@ -37,7 +37,6 @@ class WebSocketClient(
         private const val MAX_RETRY_DELAY_MS = 60_000L
     }
 
-    // 断开原因分类
     enum class DisconnectReason(val label: String) {
         USER_ACTION("user_action"),
         LIFECYCLE_ON_CLEARED("lifecycle_onCleared"),
@@ -52,15 +51,30 @@ class WebSocketClient(
         UNKNOWN("unknown")
     }
 
-    // 日志脱敏：只显示前4后4
     private fun maskDeviceId(id: String): String {
         if (id.length < 8) return "***"
         return id.substring(0, 4) + "***" + id.substring(id.length - 4)
     }
 
+    private fun shortHash(value: String): String {
+        if (value.isBlank()) return "none"
+        val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
+        return bytes.take(4).joinToString("") { "%02x".format(it) }
+    }
+
+    private fun safeUrlForLog(url: String): String {
+        return url.substringBefore('?').substringBefore('#')
+    }
+
+    private fun sanitizeErrorMessage(message: String?): String {
+        val raw = message ?: "unknown error"
+        return Regex("(wss?://[^?\\s#]+)(\\?[^\\s#]*)?")
+            .replace(raw) { match -> "${match.groupValues[1]}?<hidden>" }
+    }
+
     private val client = OkHttpClient.Builder()
-        .readTimeout(0, TimeUnit.MILLISECONDS) // 无超时，长连接
-        .pingInterval(30, TimeUnit.SECONDS)     // 30s 心跳保活
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .pingInterval(30, TimeUnit.SECONDS)
         .build()
 
     private var webSocket: WebSocket? = null
@@ -76,7 +90,6 @@ class WebSocketClient(
     private val _lastError = MutableStateFlow("")
     val lastError: StateFlow<String> = _lastError.asStateFlow()
 
-    // 最近一次断开原因
     private val _lastDisconnectReason = MutableStateFlow(DisconnectReason.UNKNOWN)
     val lastDisconnectReason: StateFlow<DisconnectReason> = _lastDisconnectReason.asStateFlow()
 
@@ -89,7 +102,6 @@ class WebSocketClient(
     private val _lastReconnectResult = MutableStateFlow("none")
     val lastReconnectResult: StateFlow<String> = _lastReconnectResult.asStateFlow()
 
-    // 收到 tap 时的回调
     var onTapReceived: ((TapEvent) -> Unit)? = null
 
     fun connect(url: String, deviceId: String, pairId: String = "test-room", force: Boolean = false) {
@@ -104,26 +116,39 @@ class WebSocketClient(
             return
         }
 
-        Log.d(TAG, "connecting to $url deviceId=${maskDeviceId(deviceId)} pairId=$pairId")
+        Log.d(
+            TAG,
+            "connecting to ${safeUrlForLog(url)} deviceId=${maskDeviceId(deviceId)} roomHash=${shortHash(pairId)}"
+        )
+
+        val request = try {
+            Request.Builder()
+                .url(url)
+                .build()
+        } catch (_: Exception) {
+            val message = "invalid websocket URL"
+            Log.e(TAG, message)
+            _lastError.value = message
+            _connectionState.value = ConnectionState.DISCONNECTED
+            _isReconnecting.value = false
+            recordDisconnect(DisconnectReason.INVALID_CONFIG)
+            return
+        }
 
         this.currentUrl = url
         this.deviceId = deviceId
         this.pairId = pairId
         this.manualCloseReason = null
 
+        _lastError.value = ""
         _connectionState.value = ConnectionState.CONNECTING
-
-        val request = Request.Builder()
-            .url(url)
-            .build()
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "connected pairId=$pairId")
+                Log.d(TAG, "connected roomHash=${shortHash(pairId)}")
                 _connectionState.value = ConnectionState.CONNECTED
                 _isReconnecting.value = false
                 _lastReconnectResult.value = if (retryAttempt > 0) "success" else "not_needed"
-                // 连接成功后重置重试
                 reconnectJob?.cancel()
                 reconnectJob = null
                 retryAttempt = 0
@@ -131,11 +156,11 @@ class WebSocketClient(
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 val event = TapEvent.fromJson(text)
-                if (event != null) {
+                if (event != null && event.pairId == pairId && event.deviceId != deviceId) {
                     Log.d(TAG, "received tap from deviceId=${maskDeviceId(event.deviceId)}")
                     onTapReceived?.invoke(event)
                 } else {
-                    Log.d(TAG, "received non-tap message, ignoring")
+                    Log.d(TAG, "received invalid or self tap message, ignoring")
                 }
             }
 
@@ -160,7 +185,7 @@ class WebSocketClient(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                val msg = t.message ?: "unknown error"
+                val msg = sanitizeErrorMessage(t.message)
                 Log.e(TAG, "failure: $msg")
 
                 _lastError.value = msg
@@ -188,10 +213,8 @@ class WebSocketClient(
             deviceId = deviceId,
             timestamp = timestamp
         )
-        val json = event.toJson()
-
-        val sent = webSocket?.send(json) ?: false
-        Log.d(TAG, "sendTap sent=$sent timestamp=$timestamp")
+        val sent = webSocket?.send(event.toJson()) ?: false
+        Log.d(TAG, "sendTap sent=$sent")
     }
 
     fun disconnect(reason: DisconnectReason) {
