@@ -13,8 +13,10 @@ object MuyuConnectionRepository {
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
-    private val _lastDisconnectReason = MutableStateFlow(WebSocketClient.DisconnectReason.UNKNOWN)
-    val lastDisconnectReason: StateFlow<WebSocketClient.DisconnectReason> = _lastDisconnectReason.asStateFlow()
+    private val _lastDisconnectReason =
+        MutableStateFlow(WebSocketClient.DisconnectReason.UNKNOWN)
+    val lastDisconnectReason: StateFlow<WebSocketClient.DisconnectReason> =
+        _lastDisconnectReason.asStateFlow()
 
     private val _lastDisconnectAtMillis = MutableStateFlow<Long?>(null)
     val lastDisconnectAtMillis: StateFlow<Long?> = _lastDisconnectAtMillis.asStateFlow()
@@ -34,11 +36,13 @@ object MuyuConnectionRepository {
     private val _lastTapReceivedAtMillis = MutableStateFlow<Long?>(null)
     val lastTapReceivedAtMillis: StateFlow<Long?> = _lastTapReceivedAtMillis.asStateFlow()
 
-    private val _appForeground = MutableStateFlow(true)
+    // 安全默认值为后台，Application.onStart 后才切换为前台。
+    private val _appForeground = MutableStateFlow(false)
     val appForeground: StateFlow<Boolean> = _appForeground.asStateFlow()
 
     private val _foregroundNotificationText = MutableStateFlow("电子木鱼未连接")
-    val foregroundNotificationText: StateFlow<String> = _foregroundNotificationText.asStateFlow()
+    val foregroundNotificationText: StateFlow<String> =
+        _foregroundNotificationText.asStateFlow()
 
     private val _receivedTapEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
     val receivedTapEvents: SharedFlow<Long> = _receivedTapEvents.asSharedFlow()
