@@ -1,86 +1,140 @@
 /**
- * 电子木鱼 — 阶段 3 联调测试客户端
+ * 电子木鱼 — 交互式联调客户端
  *
- * ⚠️ 仅用于本地开发测试，验证双人 tap 收发。
- * 使用方法：
- *   node test-client.js <room>            # 不带参数：默认 test-room
- *   node test-client.js my-room           # 指定 room
+ * 用法：
+ *   node test-client.js
+ *   node test-client.js my-room
  *
- * 该客户端会：
- * 1. 连接中继服务器
- * 2. 显示收到的 tap 事件
- * 3. 输入回车发送一次 tap
- * 4. 输入 q + 回车退出
+ * 环境变量：
+ *   WS_URL=ws://localhost:8443
  */
 
 const WebSocket = require('ws');
 const readline = require('readline');
+const crypto = require('crypto');
 
 const SERVER = process.env.WS_URL || 'ws://localhost:8443';
-const room = process.argv[2] || 'test-client';
+const room = (process.argv[2] || 'test-room').trim();
 const deviceId = `test-client-${process.pid}`;
+
+function buildTargetUrl() {
+    if (!room || room.length > 64 || /[\u0000-\u001F\u007F]/.test(room)) {
+        throw new Error('room 必须为 1-64 个无控制字符的文本');
+    }
+    const target = new URL(SERVER);
+    if (target.protocol !== 'ws:' && target.protocol !== 'wss:') {
+        throw new Error('WS_URL 必须使用 ws:// 或 wss://');
+    }
+    target.searchParams.set('room', room);
+    return target;
+}
+
+function maskDeviceId(value) {
+    if (!value || value.length < 8) return '***';
+    return `${value.substring(0, 4)}***${value.substring(value.length - 4)}`;
+}
+
+function shortHash(value) {
+    return crypto.createHash('sha256').update(value).digest('hex').substring(0, 8);
+}
+
+let targetUrl;
+try {
+    targetUrl = buildTargetUrl();
+} catch (err) {
+    console.error('[test-client] 配置错误:', err.message);
+    process.exit(1);
+}
 
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
 });
+const ws = new WebSocket(targetUrl.toString());
+let accepted = false;
+let userClosing = false;
 
-console.log(`[test-client] 连接服务器: ${SERVER}?room=${room}`);
-console.log(`[test-client] deviceId: ${deviceId}`);
-console.log(`[test-client] 按 Enter 发送 tap，输入 q + Enter 退出\n`);
-
-const ws = new WebSocket(`${SERVER}?room=${room}`);
+console.log(
+    `[test-client] 连接 ${targetUrl.protocol}//${targetUrl.host}${targetUrl.pathname} `
+    + `roomHash=${shortHash(room)} deviceId=${maskDeviceId(deviceId)}`
+);
+console.log('[test-client] relay 接受连接后，按 Enter 发送 tap；输入 q 后回车退出');
 
 ws.on('open', () => {
-    console.log('[test-client] ✅ 已连接');
+    console.log('[test-client] WebSocket 已打开，等待 room_info');
 });
 
-ws.on('message', (data) => {
+ws.on('message', (data, isBinary) => {
+    if (isBinary) {
+        console.error('[test-client] 忽略非文本响应');
+        return;
+    }
+
     try {
-        const msg = JSON.parse(data.toString());
-        if (msg.type === 'tap') {
-            const time = new Date(msg.timestamp).toLocaleTimeString();
-            const maskedId = msg.deviceId.substring(0, 4) + '***' + msg.deviceId.substring(msg.deviceId.length - 4);
-            console.log(`[test-client] 🔔 收到 tap 来自 ${maskedId} 时间=${time}`);
-        } else if (msg.type === 'room_info') {
-            console.log(`[test-client] 📋 房间信息: room=${msg.room} 在线=${msg.connections}`);
-        } else {
-            console.log(`[test-client] 📨 收到消息:`, JSON.stringify(msg));
+        const message = JSON.parse(data.toString());
+        if (message.type === 'room_info') {
+            if (message.room !== room) {
+                console.error('[test-client] relay 返回了不匹配的 room');
+                ws.close(1008, 'room mismatch');
+                return;
+            }
+            accepted = true;
+            console.log(`[test-client] relay 已接受，在线连接数=${message.connections}`);
+            return;
         }
-    } catch (e) {
-        console.log('[test-client] 📨 收到原始消息:', data.toString());
+
+        if (message.type === 'tap') {
+            const sender = maskDeviceId(message.deviceId);
+            const time = new Date(message.timestamp).toLocaleTimeString();
+            console.log(`[test-client] 收到 tap，deviceId=${sender} time=${time}`);
+        }
+    } catch (err) {
+        console.error('[test-client] 无法解析响应:', err.message);
     }
 });
 
-ws.on('close', (code, reason) => {
-    console.log(`[test-client] ❌ 断开连接 code=${code} reason=${reason}`);
-    process.exit(0);
+ws.on('close', (code, reasonBuffer) => {
+    const reason = reasonBuffer?.toString() || 'none';
+    console.log(`[test-client] 连接关闭 code=${code} reason=${reason}`);
+    rl.close();
+    process.exit(userClosing && code === 1000 ? 0 : 1);
 });
 
 ws.on('error', (err) => {
-    console.error('[test-client] ⚠️ 错误:', err.message);
+    console.error('[test-client] WebSocket 错误:', err.message);
 });
 
 rl.on('line', (input) => {
-    if (input.toLowerCase() === 'q') {
-        console.log('[test-client] 退出');
-        ws.close();
-        rl.close();
+    if (input.trim().toLowerCase() === 'q') {
+        userClosing = true;
+        ws.close(1000, 'user exit');
+        return;
+    }
+
+    if (!accepted || ws.readyState !== WebSocket.OPEN) {
+        console.log('[test-client] relay 尚未接受连接，未发送');
         return;
     }
 
     const tap = {
         type: 'tap',
         pairId: room,
-        deviceId: deviceId,
+        deviceId,
         timestamp: Date.now()
     };
 
-    ws.send(JSON.stringify(tap));
-    console.log(`[test-client] 👆 发送 tap (${new Date().toLocaleTimeString()})`);
+    ws.send(JSON.stringify(tap), (err) => {
+        if (err) {
+            console.error('[test-client] 发送失败:', err.message);
+        } else {
+            console.log(`[test-client] 已发送 tap (${new Date().toLocaleTimeString()})`);
+        }
+    });
 });
 
 rl.on('close', () => {
-    ws.close();
-    process.exit(0);
+    if (ws.readyState === WebSocket.OPEN) {
+        userClosing = true;
+        ws.close(1000, 'input closed');
+    }
 });
