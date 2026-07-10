@@ -14,8 +14,8 @@ data class ReceivedTapUiEvent(
 )
 
 object MuyuConnectionRepository {
-    // 高于 relay 当前允许的 20 条/10 秒窗口，避免合法突发消息丢失前台反馈。
-    private const val MAX_PENDING_UI_EVENTS = 32
+    // 覆盖 relay 默认允许的 60 条/10 秒窗口并保留少量余量。
+    private const val MAX_PENDING_UI_EVENTS = 64
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -43,7 +43,6 @@ object MuyuConnectionRepository {
     private val _lastTapReceivedAtMillis = MutableStateFlow<Long?>(null)
     val lastTapReceivedAtMillis: StateFlow<Long?> = _lastTapReceivedAtMillis.asStateFlow()
 
-    // 安全默认值为后台，Application.onStart 后才切换为前台。
     private val _appForeground = MutableStateFlow(false)
     val appForeground: StateFlow<Boolean> = _appForeground.asStateFlow()
 
