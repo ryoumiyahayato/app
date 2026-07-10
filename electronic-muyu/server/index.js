@@ -40,6 +40,12 @@ function shortHash(value) {
     return crypto.createHash('sha256').update(value).digest('hex').substring(0, 8);
 }
 
+function safeLogValue(value, maxLength = 80) {
+    return String(value ?? 'none')
+        .replace(/[\u0000-\u001F\u007F]/g, '?')
+        .slice(0, maxLength);
+}
+
 function tokenMatches(actualToken) {
     if (!RELAY_TOKEN) return true;
     const expected = Buffer.from(RELAY_TOKEN);
@@ -93,7 +99,7 @@ const httpServer = http.createServer((req, res) => {
 });
 
 httpServer.on('clientError', (err, socket) => {
-    console.error('[relay] HTTP client error:', err.message);
+    console.error('[relay] HTTP client error:', safeLogValue(err.message));
     if (socket.writable) {
         socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
     }
@@ -204,8 +210,8 @@ wss.on('connection', (ws, req) => {
         try {
             const parsed = JSON.parse(data.toString());
             console.log(
-                `[relay] [${connId}] 收到消息 type=${parsed?.type || 'unknown'} `
-                + `deviceId=${maskDeviceId(parsed?.deviceId)}`
+                `[relay] [${connId}] 收到消息 type=${safeLogValue(parsed?.type, 32)} `
+                + `deviceId=${safeLogValue(maskDeviceId(parsed?.deviceId), 32)}`
             );
 
             if (!isValidTap(parsed, room)) {
@@ -227,7 +233,10 @@ wss.on('connection', (ws, req) => {
                         client.send(payload);
                         forwarded++;
                     } catch (err) {
-                        console.error(`[relay] [${connId}] 转发失败:`, err.message);
+                        console.error(
+                            `[relay] [${connId}] 转发失败:`,
+                            safeLogValue(err.message)
+                        );
                     }
                 }
             });
@@ -237,12 +246,15 @@ wss.on('connection', (ws, req) => {
                 + `roomHash=${roomHash}`
             );
         } catch (err) {
-            console.error(`[relay] [${connId}] 消息解析失败:`, err.message);
+            console.error(
+                `[relay] [${connId}] 消息解析失败:`,
+                safeLogValue(err.message)
+            );
         }
     });
 
     ws.on('close', (code, reasonBuffer) => {
-        const reason = reasonBuffer?.toString() || 'none';
+        const reason = safeLogValue(reasonBuffer?.toString() || 'none');
         console.log(
             `[relay] [${connId}] 断开 code=${code} reason=${reason} `
             + `roomHash=${roomHash}`
@@ -260,22 +272,30 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('error', (err) => {
-        console.error(`[relay] [${connId}] WebSocket 错误:`, err.message);
+        console.error(
+            `[relay] [${connId}] WebSocket 错误:`,
+            safeLogValue(err.message)
+        );
     });
 });
 
 wss.on('error', (err) => {
-    console.error('[relay] 服务器错误:', err.message);
+    console.error('[relay] 服务器错误:', safeLogValue(err.message));
 });
 
 const heartbeatTimer = setInterval(() => {
     wss.clients.forEach((client) => {
+        if (client.readyState !== WebSocket.OPEN) return;
         if (client.isAlive === false) {
             client.terminate();
             return;
         }
         client.isAlive = false;
-        client.ping();
+        try {
+            client.ping();
+        } catch (_) {
+            client.terminate();
+        }
     });
 }, HEARTBEAT_INTERVAL_MS);
 heartbeatTimer.unref();
@@ -310,19 +330,28 @@ function shutdown(signal) {
         }
     });
 
-    const forceTimer = setTimeout(() => {
+    let finished = false;
+    let forceTimer;
+    const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (forceTimer) clearTimeout(forceTimer);
         wss.clients.forEach((client) => client.terminate());
-        httpServer.close(() => process.exit(0));
-    }, 2_000);
-    forceTimer.unref();
 
-    wss.close(() => {
-        clearTimeout(forceTimer);
-        httpServer.close(() => {
+        const exitTimer = setTimeout(() => process.exit(0), 1_000);
+        exitTimer.unref();
+        httpServer.close((err) => {
+            if (err && err.code !== 'ERR_SERVER_NOT_RUNNING') {
+                console.error('[relay] HTTP 关闭错误:', safeLogValue(err.message));
+            }
             console.log('[relay] 服务已关闭');
             process.exit(0);
         });
-    });
+    };
+
+    forceTimer = setTimeout(finish, 2_000);
+    forceTimer.unref();
+    wss.close(finish);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
