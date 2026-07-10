@@ -189,7 +189,17 @@ class WebSocketClient(
                 scope.launch {
                     if (!isCurrentConnection(generation, socket)) return@launch
                     Log.d(TAG, "closing code=$code")
-                    socket.close(1000, null)
+
+                    // 回送服务端原始关闭码，确保 4000/4001/4002/4008 等终止性原因
+                    // 不会在握手过程中被改写为 1000，继而误判为可重连错误。
+                    val acknowledged = try {
+                        socket.close(code, null)
+                    } catch (_: IllegalArgumentException) {
+                        socket.close(1000, null)
+                    }
+                    if (!acknowledged) {
+                        socket.cancel()
+                    }
                 }
             }
 
