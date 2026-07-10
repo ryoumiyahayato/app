@@ -224,12 +224,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun saveConnectionConfig(serverUrl: String, roomId: String) {
+    fun saveConnectionConfig(serverUrl: String, roomId: String): Boolean {
         val normalizedUrl = serverUrl.trim()
         val normalizedRoomId = roomId.trim()
         if (buildWebSocketUrl(normalizedUrl, normalizedRoomId) == null) {
             MuyuConnectionRepository.setLastError("连接配置无效，未保存")
-            return
+            return false
         }
 
         viewModelScope.launch {
@@ -237,6 +237,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localDataStore.setRoomId(normalizedRoomId)
             MuyuConnectionRepository.setLastError("")
         }
+        return true
     }
 
     fun resetConnectionConfig() {
