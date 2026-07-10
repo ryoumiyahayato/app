@@ -4,6 +4,9 @@
   "private": true,
   "description": "电子木鱼本地开发与短期公网联调用的最小 WebSocket 中继服务",
   "main": "index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node index.js",
     "send": "node send-tap.js",
