@@ -1,6 +1,7 @@
 package app.electronicmuyu.android.data
 
 import android.content.Context
+import android.net.Uri
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -22,6 +23,15 @@ class LocalDataStore(private val context: Context) {
         private val KEY_DEVICE_ID = stringPreferencesKey("device_id")
         private val KEY_WS_URL = stringPreferencesKey("ws_url")
         private val KEY_ROOM_ID = stringPreferencesKey("room_id")
+        private val SENSITIVE_QUERY_KEYS = setOf(
+            "token",
+            "session",
+            "session_token",
+            "auth",
+            "authorization",
+            "api_key",
+            "apikey"
+        )
     }
 
     val meriCount: Flow<Int> = context.dataStore.data.map { prefs ->
@@ -117,8 +127,14 @@ class LocalDataStore(private val context: Context) {
     /**
      * 服务器地址和房间 ID 必须作为同一份配置原子写入，避免进程在两次 edit 之间
      * 被终止时留下 URL 与 room 不匹配的半保存状态。
+     * 当前版本没有 Keystore 凭据配置，因此禁止把 token/session 等秘密写入普通 DataStore。
      */
     suspend fun setConnectionConfig(url: String, roomId: String) {
+        val queryNames = Uri.parse(url).queryParameterNames
+        require(queryNames.none { it.lowercase() in SENSITIVE_QUERY_KEYS }) {
+            "Sensitive connection credentials must not be stored in plain DataStore"
+        }
+
         context.dataStore.edit { prefs ->
             prefs[KEY_WS_URL] = url
             prefs[KEY_ROOM_ID] = roomId
