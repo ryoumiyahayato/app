@@ -16,6 +16,7 @@ const crypto = require('crypto');
 const SERVER = process.env.WS_URL || 'ws://localhost:8443';
 const room = (process.argv[2] || 'test-room').trim();
 const deviceId = `test-client-${process.pid}`;
+const ACCEPT_TIMEOUT_MS = 5_000;
 
 function buildTargetUrl() {
     if (!room || room.length > 64 || /[\u0000-\u001F\u007F]/.test(room)) {
@@ -38,6 +39,12 @@ function shortHash(value) {
     return crypto.createHash('sha256').update(value).digest('hex').substring(0, 8);
 }
 
+function safeReason(value) {
+    return String(value || 'none')
+        .replace(/[\u0000-\u001F\u007F]/g, '?')
+        .slice(0, 80);
+}
+
 let targetUrl;
 try {
     targetUrl = buildTargetUrl();
@@ -53,6 +60,11 @@ const rl = readline.createInterface({
 const ws = new WebSocket(targetUrl.toString());
 let accepted = false;
 let userClosing = false;
+let finished = false;
+
+const acceptTimer = setTimeout(() => {
+    finish(1, '等待 relay 接受连接超时');
+}, ACCEPT_TIMEOUT_MS);
 
 console.log(
     `[test-client] 连接 ${targetUrl.protocol}//${targetUrl.host}${targetUrl.pathname} `
@@ -74,11 +86,11 @@ ws.on('message', (data, isBinary) => {
         const message = JSON.parse(data.toString());
         if (message.type === 'room_info') {
             if (message.room !== room) {
-                console.error('[test-client] relay 返回了不匹配的 room');
-                ws.close(1008, 'room mismatch');
+                finish(1, 'relay 返回了不匹配的 room');
                 return;
             }
             accepted = true;
+            clearTimeout(acceptTimer);
             console.log(`[test-client] relay 已接受，在线连接数=${message.connections}`);
             return;
         }
@@ -89,25 +101,26 @@ ws.on('message', (data, isBinary) => {
             console.log(`[test-client] 收到 tap，deviceId=${sender} time=${time}`);
         }
     } catch (err) {
-        console.error('[test-client] 无法解析响应:', err.message);
+        console.error('[test-client] 无法解析响应:', safeReason(err.message));
     }
 });
 
 ws.on('close', (code, reasonBuffer) => {
-    const reason = reasonBuffer?.toString() || 'none';
-    console.log(`[test-client] 连接关闭 code=${code} reason=${reason}`);
-    rl.close();
-    process.exit(userClosing && code === 1000 ? 0 : 1);
+    if (finished) return;
+    const reason = safeReason(reasonBuffer?.toString());
+    finish(userClosing ? 0 : 1, `连接关闭 code=${code} reason=${reason}`, false);
 });
 
 ws.on('error', (err) => {
-    console.error('[test-client] WebSocket 错误:', err.message);
+    if (!finished) {
+        console.error('[test-client] WebSocket 错误:', safeReason(err.message));
+    }
 });
 
 rl.on('line', (input) => {
     if (input.trim().toLowerCase() === 'q') {
         userClosing = true;
-        ws.close(1000, 'user exit');
+        finish(0, '用户退出');
         return;
     }
 
@@ -125,7 +138,7 @@ rl.on('line', (input) => {
 
     ws.send(JSON.stringify(tap), (err) => {
         if (err) {
-            console.error('[test-client] 发送失败:', err.message);
+            console.error('[test-client] 发送失败:', safeReason(err.message));
         } else {
             console.log(`[test-client] 已发送 tap (${new Date().toLocaleTimeString()})`);
         }
@@ -133,8 +146,26 @@ rl.on('line', (input) => {
 });
 
 rl.on('close', () => {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (!finished) {
         userClosing = true;
-        ws.close(1000, 'input closed');
+        finish(0, '输入已关闭');
     }
 });
+
+function finish(exitCode, message, closeSocket = true) {
+    if (finished) return;
+    finished = true;
+    clearTimeout(acceptTimer);
+    console.log(`[test-client] ${message}`);
+
+    if (closeSocket) {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.close(1000, 'client finish');
+        } else if (ws.readyState === WebSocket.CONNECTING) {
+            ws.terminate();
+        }
+    }
+
+    rl.close();
+    setTimeout(() => process.exit(exitCode), 20);
+}
