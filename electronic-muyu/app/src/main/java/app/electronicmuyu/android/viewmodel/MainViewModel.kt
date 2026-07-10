@@ -132,7 +132,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (MuyuConnectionRepository.appForeground.value) {
                         events.forEach { event ->
                             val age = now - event.receivedAtMillis
-                            if (age in 0..MAX_UI_EVENT_AGE_MS) {
+                            if (age in 0L..MAX_UI_EVENT_AGE_MS) {
                                 _lastReceivedTime.value = event.receivedAtMillis
                                 _lastReceivedEvent.value = event.id
                                 playSoundAndVibrate()
@@ -379,6 +379,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 localDataStore.clearAllCounts()
+                MuyuConnectionRepository.clearPendingReceivedTapUiEvents()
                 _lastTappedTime.value = null
                 _lastReceivedTime.value = null
                 _lastReceivedEvent.value = null
@@ -430,7 +431,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             builder.appendQueryParameter("room", trimmedRoomId)
             val fullUrl = builder.build().toString()
 
-            // Request.Builder 与实际 WebSocketClient 使用同一套 OkHttp URL 规则。
             Request.Builder().url(fullUrl).build()
             fullUrl
         } catch (_: Exception) {
