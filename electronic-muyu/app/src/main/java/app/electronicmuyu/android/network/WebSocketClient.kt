@@ -335,11 +335,11 @@ class WebSocketClient(
     }
 
     private fun disconnectReasonForHttpStatus(statusCode: Int?): DisconnectReason {
-        return when (statusCode) {
-            429 -> DisconnectReason.RATE_LIMITED
-            in 400..499 -> DisconnectReason.SERVER_REJECTED
-            else -> DisconnectReason.NETWORK_ERROR
+        if (statusCode == 429) return DisconnectReason.RATE_LIMITED
+        if (statusCode != null && statusCode in 400..499) {
+            return DisconnectReason.SERVER_REJECTED
         }
+        return DisconnectReason.NETWORK_ERROR
     }
 
     private fun userMessageForCloseCode(code: Int): String? {
