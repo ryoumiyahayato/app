@@ -113,4 +113,9 @@ object MuyuConnectionRepository {
             current.filterNot { it.id in consumedIds }
         }
     }
+
+    fun clearPendingReceivedTapUiEvents() {
+        _pendingReceivedTapUiEvents.value = emptyList()
+        _lastTapReceivedAtMillis.value = null
+    }
 }
