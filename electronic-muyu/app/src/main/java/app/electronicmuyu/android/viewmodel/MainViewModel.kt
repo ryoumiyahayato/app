@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import okhttp3.Request
 import java.util.UUID
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -84,6 +85,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
         const val DEFAULT_ROOM_ID = "test-room"
         private const val MAX_ROOM_ID_LENGTH = 64
+        private const val MAX_SERVER_URL_LENGTH = 2048
+        private const val MAX_UI_EVENT_AGE_MS = 10_000L
     }
 
     init {
@@ -103,7 +106,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localDataStore.notificationEnabled.collect { _notificationEnabled.value = it }
         }
         viewModelScope.launch {
-            resolveDeviceId()
+            try {
+                resolveDeviceId()
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("无法初始化设备标识")
+            }
         }
         viewModelScope.launch {
             localDataStore.wsUrl.collect { savedUrl ->
@@ -116,11 +123,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            MuyuConnectionRepository.receivedTapEvents.collect { timestamp ->
-                _lastReceivedTime.value = timestamp
-                if (MuyuConnectionRepository.appForeground.value) {
-                    _lastReceivedEvent.value = timestamp
-                    playSoundAndVibrate()
+            MuyuConnectionRepository.pendingReceivedTapUiEvents.collect { events ->
+                if (events.isEmpty()) return@collect
+
+                val eventIds = events.map { it.id }
+                try {
+                    val now = System.currentTimeMillis()
+                    if (MuyuConnectionRepository.appForeground.value) {
+                        events.forEach { event ->
+                            val age = now - event.receivedAtMillis
+                            if (age in 0..MAX_UI_EVENT_AGE_MS) {
+                                _lastReceivedTime.value = event.receivedAtMillis
+                                _lastReceivedEvent.value = event.id
+                                playSoundAndVibrate()
+                            }
+                        }
+                    }
+                } finally {
+                    MuyuConnectionRepository.consumeReceivedTapUiEvents(eventIds)
                 }
             }
         }
@@ -263,7 +283,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         playSoundAndVibrate()
 
         viewModelScope.launch {
-            localDataStore.incrementMeriCount()
+            try {
+                localDataStore.incrementMeriCount()
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("本机功德计数保存失败")
+            }
         }
 
         if (
@@ -287,26 +311,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setSoundEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            _soundEnabled.value = enabled
-            localDataStore.setSoundEnabled(enabled)
+            try {
+                localDataStore.setSoundEnabled(enabled)
+                _soundEnabled.value = enabled
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("声音设置保存失败")
+            }
         }
     }
 
     fun setVibrationEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            _vibrationEnabled.value = enabled
-            localDataStore.setVibrationEnabled(enabled)
+            try {
+                localDataStore.setVibrationEnabled(enabled)
+                _vibrationEnabled.value = enabled
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("震动设置保存失败")
+            }
         }
     }
 
     fun setNotificationEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            _notificationEnabled.value = enabled
-            localDataStore.setNotificationEnabled(enabled)
+            try {
+                localDataStore.setNotificationEnabled(enabled)
+                _notificationEnabled.value = enabled
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("通知设置保存失败")
+            }
         }
     }
 
-    fun saveConnectionConfig(serverUrl: String, roomId: String): Boolean {
+    suspend fun saveConnectionConfig(serverUrl: String, roomId: String): Boolean {
         val normalizedUrl = serverUrl.trim()
         val normalizedRoomId = roomId.trim()
         if (buildWebSocketUrl(normalizedUrl, normalizedRoomId) == null) {
@@ -314,28 +350,41 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return false
         }
 
-        viewModelScope.launch {
-            localDataStore.setWsUrl(normalizedUrl)
-            localDataStore.setRoomId(normalizedRoomId)
+        return try {
+            localDataStore.setConnectionConfig(normalizedUrl, normalizedRoomId)
+            _serverUrl.value = normalizedUrl
+            _roomId.value = normalizedRoomId
             MuyuConnectionRepository.setLastError("")
+            true
+        } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("连接配置保存失败")
+            false
         }
-        return true
     }
 
-    fun resetConnectionConfig() {
-        viewModelScope.launch {
-            localDataStore.setWsUrl("")
-            localDataStore.setRoomId("")
+    suspend fun resetConnectionConfig(): Boolean {
+        return try {
+            localDataStore.resetConnectionConfig()
+            _serverUrl.value = DEFAULT_SERVER_URL
+            _roomId.value = DEFAULT_ROOM_ID
             MuyuConnectionRepository.setLastError("")
+            true
+        } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("默认连接配置恢复失败")
+            false
         }
     }
 
     fun clearAllCounts() {
         viewModelScope.launch {
-            _lastTappedTime.value = null
-            _lastReceivedTime.value = null
-            _lastReceivedEvent.value = null
-            localDataStore.clearAllCounts()
+            try {
+                localDataStore.clearAllCounts()
+                _lastTappedTime.value = null
+                _lastReceivedTime.value = null
+                _lastReceivedEvent.value = null
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("计数清空失败")
+            }
         }
     }
 
@@ -350,12 +399,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun buildWebSocketUrl(serverUrl: String, roomId: String): String? {
         val trimmedServerUrl = serverUrl.trim()
         val trimmedRoomId = roomId.trim()
-        if (trimmedServerUrl.isEmpty() || !isValidRoomId(trimmedRoomId)) return null
+        if (
+            trimmedServerUrl.isEmpty() ||
+            trimmedServerUrl.length > MAX_SERVER_URL_LENGTH ||
+            !isValidRoomId(trimmedRoomId)
+        ) {
+            return null
+        }
 
         return try {
             val parsedUri = Uri.parse(trimmedServerUrl)
             val scheme = parsedUri.scheme?.lowercase()
-            if ((scheme != "ws" && scheme != "wss") || parsedUri.host.isNullOrBlank()) {
+            if (
+                (scheme != "ws" && scheme != "wss") ||
+                parsedUri.host.isNullOrBlank() ||
+                !parsedUri.encodedUserInfo.isNullOrEmpty() ||
+                parsedUri.fragment != null
+            ) {
                 return null
             }
 
@@ -368,7 +428,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             builder.appendQueryParameter("room", trimmedRoomId)
-            builder.build().toString()
+            val fullUrl = builder.build().toString()
+
+            // Request.Builder 与实际 WebSocketClient 使用同一套 OkHttp URL 规则。
+            Request.Builder().url(fullUrl).build()
+            fullUrl
         } catch (_: Exception) {
             null
         }
