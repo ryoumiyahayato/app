@@ -2,14 +2,20 @@ package app.electronicmuyu.android.service
 
 import app.electronicmuyu.android.model.ConnectionState
 import app.electronicmuyu.android.network.WebSocketClient
-import kotlinx.coroutines.flow.MutableSharedFlow
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+
+data class ReceivedTapUiEvent(
+    val id: Long,
+    val receivedAtMillis: Long
+)
 
 object MuyuConnectionRepository {
+    private const val MAX_PENDING_UI_EVENTS = 16
+
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
@@ -44,8 +50,11 @@ object MuyuConnectionRepository {
     val foregroundNotificationText: StateFlow<String> =
         _foregroundNotificationText.asStateFlow()
 
-    private val _receivedTapEvents = MutableSharedFlow<Long>(extraBufferCapacity = 8)
-    val receivedTapEvents: SharedFlow<Long> = _receivedTapEvents.asSharedFlow()
+    private val eventSequence = AtomicLong(0L)
+    private val _pendingReceivedTapUiEvents =
+        MutableStateFlow<List<ReceivedTapUiEvent>>(emptyList())
+    val pendingReceivedTapUiEvents: StateFlow<List<ReceivedTapUiEvent>> =
+        _pendingReceivedTapUiEvents.asStateFlow()
 
     fun setConnectionState(state: ConnectionState) {
         _connectionState.value = state
@@ -80,8 +89,28 @@ object MuyuConnectionRepository {
         _foregroundNotificationText.value = text
     }
 
-    fun emitReceivedTap(atMillis: Long) {
-        _lastTapReceivedAtMillis.value = atMillis
-        _receivedTapEvents.tryEmit(atMillis)
+    /**
+     * 所有 tap 都更新最近接收时间；只有在接收瞬间位于前台的 tap 才进入 UI 待处理队列。
+     * 队列有上限，避免异常高频消息导致进程内存持续增长。
+     */
+    fun recordReceivedTap(receivedAtMillis: Long, enqueueForForegroundUi: Boolean) {
+        _lastTapReceivedAtMillis.value = receivedAtMillis
+        if (!enqueueForForegroundUi) return
+
+        val event = ReceivedTapUiEvent(
+            id = eventSequence.incrementAndGet(),
+            receivedAtMillis = receivedAtMillis
+        )
+        _pendingReceivedTapUiEvents.update { current ->
+            (current + event).takeLast(MAX_PENDING_UI_EVENTS)
+        }
+    }
+
+    fun consumeReceivedTapUiEvents(eventIds: Collection<Long>) {
+        if (eventIds.isEmpty()) return
+        val consumedIds = eventIds.toHashSet()
+        _pendingReceivedTapUiEvents.update { current ->
+            current.filterNot { it.id in consumedIds }
+        }
     }
 }
