@@ -44,16 +44,24 @@ class LocalDataStore(private val context: Context) {
         prefs[KEY_NOTIFICATION_ENABLED] ?: false
     }
 
-    val deviceId: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[KEY_DEVICE_ID] ?: ""
-    }
-
     val wsUrl: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[KEY_WS_URL] ?: ""
     }
 
     val roomId: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[KEY_ROOM_ID] ?: ""
+    }
+
+    suspend fun getOrCreateDeviceId(createId: () -> String): String {
+        var resolvedId = ""
+        context.dataStore.edit { prefs ->
+            val savedId = prefs[KEY_DEVICE_ID].orEmpty()
+            resolvedId = savedId.ifEmpty { createId() }
+            if (savedId.isEmpty()) {
+                prefs[KEY_DEVICE_ID] = resolvedId
+            }
+        }
+        return resolvedId
     }
 
     suspend fun incrementMeriCount(): Int {
@@ -103,12 +111,6 @@ class LocalDataStore(private val context: Context) {
     suspend fun setNotificationEnabled(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[KEY_NOTIFICATION_ENABLED] = enabled
-        }
-    }
-
-    suspend fun setDeviceId(id: String) {
-        context.dataStore.edit { prefs ->
-            prefs[KEY_DEVICE_ID] = id
         }
     }
 
