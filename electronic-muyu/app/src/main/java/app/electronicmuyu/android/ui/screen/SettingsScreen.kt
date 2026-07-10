@@ -1,6 +1,5 @@
 package app.electronicmuyu.android.ui.screen
 
-import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -41,6 +40,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
+import app.electronicmuyu.android.data.LocalDataStore
 import app.electronicmuyu.android.model.ConnectionState
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -642,13 +643,15 @@ private fun validateServerUrl(serverUrl: String): String? {
     }
 
     return try {
-        val uri = Uri.parse(serverUrl)
+        val uri = serverUrl.toUri()
         val scheme = uri.scheme?.lowercase()
         when {
             scheme != "ws" && scheme != "wss" -> "必须以 ws:// 或 wss:// 开头"
             uri.host.isNullOrBlank() -> "服务器地址必须包含主机名或 IP"
             !uri.encodedUserInfo.isNullOrEmpty() -> "服务器地址不能包含用户名或密码"
             uri.fragment != null -> "服务器地址不能包含 #fragment"
+            !LocalDataStore.canStoreConnectionUrl(serverUrl) ->
+                "服务器地址不能包含 token、session、密码等敏感凭据"
             uri.port == 0 || uri.port > 65535 -> "服务器端口必须为 1-65535"
             else -> null
         }

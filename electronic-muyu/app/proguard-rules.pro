@@ -1,14 +1,3 @@
-# Electronic Muyu ProGuard Rules
-# Keep all our application classes
--keep class app.electronicmuyu.** { *; }
-
-# Keep data classes used for JSON serialization
--keep class app.electronicmuyu.android.model.** { *; }
-
-# OkHttp
--dontwarn okhttp3.**
--dontwarn okio.**
-
-# Kotlin Coroutines
--keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
--keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+# Electronic Muyu uses no reflection-based application model serialization.
+# AndroidX, OkHttp and coroutines provide their own consumer rules, so broad
+# application keep rules would only disable useful R8 shrinking/obfuscation.

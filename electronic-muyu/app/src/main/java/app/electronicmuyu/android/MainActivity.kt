@@ -28,6 +28,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import app.electronicmuyu.android.notification.NotificationHelper
+import app.electronicmuyu.android.service.MuyuConnectionRepository
 import app.electronicmuyu.android.ui.screen.MainScreen
 import app.electronicmuyu.android.ui.screen.SettingsScreen
 import app.electronicmuyu.android.ui.theme.ElectronicMuyuTheme
@@ -57,6 +58,16 @@ class MainActivity : ComponentActivity() {
                 })
             }
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        MuyuConnectionRepository.setUiForeground(true)
+    }
+
+    override fun onStop() {
+        MuyuConnectionRepository.setUiForeground(false)
+        super.onStop()
     }
 
     private fun requestNotificationPermission() {

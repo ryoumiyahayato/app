@@ -96,10 +96,22 @@ class MuyuForegroundService : Service() {
         when (intent?.action) {
             ACTION_START_CONNECT -> {
                 readConnectionExtras(intent)
-                startForeground(
-                    NOTIFICATION_ID,
-                    buildConnectionNotification(ConnectionState.CONNECTING)
-                )
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        buildConnectionNotification(ConnectionState.CONNECTING)
+                    )
+                } catch (error: Exception) {
+                    Log.e(TAG, "failed to start foreground connection service", error)
+                    MuyuConnectionRepository.setLastError("无法启动前台连接通知")
+                    MuyuConnectionRepository.setDisconnectReason(
+                        WebSocketClient.DisconnectReason.SERVICE_START_FAILED,
+                        System.currentTimeMillis()
+                    )
+                    stopReason = WebSocketClient.DisconnectReason.SERVICE_START_FAILED
+                    stopSelf(startId)
+                    return START_NOT_STICKY
+                }
                 foregroundStarted = true
                 MuyuConnectionRepository.setServiceRunning(true)
                 connectIfConfigValid()
@@ -114,7 +126,9 @@ class MuyuForegroundService : Service() {
                         EXTRA_TIMESTAMP,
                         System.currentTimeMillis()
                     )
-                    wsClient.sendTap(timestamp)
+                    if (!wsClient.sendTap(timestamp)) {
+                        MuyuConnectionRepository.setLastError("提醒发送失败，请检查连接状态")
+                    }
                 } else {
                     Log.d(TAG, "send tap ignored: service is not connected")
                 }
@@ -262,7 +276,13 @@ class MuyuForegroundService : Service() {
         MuyuConnectionRepository.setForegroundNotificationText(text)
         val notificationManager =
             getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        notificationManager.notify(NOTIFICATION_ID, buildConnectionNotification(state))
+        try {
+            notificationManager.notify(NOTIFICATION_ID, buildConnectionNotification(state))
+        } catch (error: Exception) {
+            // 常驻通知更新失败不应中断仍然健康的 WebSocket。
+            Log.e(TAG, "failed to update foreground notification", error)
+            MuyuConnectionRepository.setLastError("连接仍在运行，但常驻通知更新失败")
+        }
     }
 
     private fun buildConnectionNotification(state: ConnectionState): Notification {

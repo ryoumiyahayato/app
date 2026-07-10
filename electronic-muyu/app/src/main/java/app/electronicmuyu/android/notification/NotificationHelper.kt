@@ -104,10 +104,24 @@ object NotificationHelper {
             .setContentIntent(pendingIntent)
             .build()
 
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.e(TAG, "notify skipped: permission changed before delivery")
+            return false
+        }
+
         return try {
             NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
             Log.d(TAG, "notify success")
             true
+        } catch (exception: SecurityException) {
+            Log.e(TAG, "notify failed: permission was revoked", exception)
+            false
         } catch (exception: Exception) {
             Log.e(
                 TAG,

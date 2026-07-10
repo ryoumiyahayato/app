@@ -7,16 +7,19 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
 
-    <!-- usesCleartextTraffic 仅用于开发阶段 ws:// 本地和短期公网测试。
-         正式发布切换到 wss:// 后必须移除。 -->
+    <!-- Release 默认只允许 wss://。debug source set 会为本地和 6B 短期联调
+         单独覆盖为 true，避免明文能力进入正式包。 -->
     <application
         android:name=".ElectronicMuyuApplication"
         android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.ElectronicMuyu"
-        android:usesCleartextTraffic="true">
+        android:usesCleartextTraffic="false">
 
         <activity
             android:name=".MainActivity"

@@ -42,7 +42,9 @@ GET http://localhost:8443/health
 |---|---|---|
 | `PORT` | `8443` | 1～65535 范围内的监听端口 |
 | `RELAY_TOKEN` | 空 | 可选共享 secret；设置后客户端必须提供相同 token |
+| `MAX_TOTAL_CONNECTIONS` | `100` | relay 总连接数上限，范围 1～10000 |
 | `MAX_MESSAGES_PER_WINDOW` | `60` | 每个连接在 10 秒窗口内允许的消息数，范围 1～1000 |
+| `HEARTBEAT_INTERVAL_MS` | `30000` | ping/pong 心跳间隔，范围 100～300000 毫秒 |
 
 当前 Android 端尚未提供安全 token 输入，因此 6B 初次公网联调不得设置 `RELAY_TOKEN`。
 
@@ -187,12 +189,29 @@ npm test
 
 当前脚本定义以下场景：
 
-1. 两台同房间客户端连接。
-2. 双向 tap 转发。
-3. 发送方不回显。
-4. 不同 room 不串消息。
+1. `/health` 返回 200，普通 HTTP 路径返回 426。
+2. 达到 relay 总连接上限后新连接被 `4003` 拒绝。
+3. 两台同房间客户端连接，双向 tap 转发。
+4. 发送方不回显，不同 room 不串消息。
 5. 第三台设备被 `4002` 拒绝。
-6. 错误 pairId 和未知消息不会转发。
+6. 错误 pairId、未知消息和异常 JSON 不会转发。
+7. 空 room 被 `4000` 拒绝。
+8. 设置 `RELAY_TOKEN` 运行测试时，错误 token 被 `4001` 拒绝。
+9. 二进制和超过 4 KB 的消息分别以 `1003`、`1009` 关闭。
+10. 断开后房间名额可重用并继续转发。
+11. 超过配置的消息速率后以 `4008` 关闭。
+
+回归脚本需要与 relay 使用相同的 `RELAY_TOKEN`、`MAX_TOTAL_CONNECTIONS` 和
+`MAX_MESSAGES_PER_WINDOW`、`HEARTBEAT_INTERVAL_MS` 环境变量。为了缩短本地容量和
+心跳测试，可在两个终端都设置：
+
+```powershell
+$env:MAX_TOTAL_CONNECTIONS="12"
+$env:HEARTBEAT_INTERVAL_MS="200"
+```
+
+当心跳间隔不超过 2 秒时，自动回归会额外验证不回应 ping 的连接被终止；默认 30 秒
+运行时跳过该耗时场景。
 
 ## Android App 配置
 

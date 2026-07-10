@@ -13,7 +13,12 @@ const PORT = parseIntegerInRange(process.env.PORT, 8443, 1, 65535);
 const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const MAX_PAYLOAD_BYTES = 4 * 1024;
 const MAX_ROOM_CONNECTIONS = 2;
-const MAX_TOTAL_CONNECTIONS = 100;
+const MAX_TOTAL_CONNECTIONS = parseIntegerInRange(
+    process.env.MAX_TOTAL_CONNECTIONS,
+    100,
+    1,
+    10_000
+);
 const RATE_LIMIT_WINDOW_MS = 10_000;
 const MAX_MESSAGES_PER_WINDOW = parseIntegerInRange(
     process.env.MAX_MESSAGES_PER_WINDOW,
@@ -21,7 +26,12 @@ const MAX_MESSAGES_PER_WINDOW = parseIntegerInRange(
     1,
     1_000
 );
-const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = parseIntegerInRange(
+    process.env.HEARTBEAT_INTERVAL_MS,
+    30_000,
+    100,
+    300_000
+);
 
 const rooms = new Map();
 let shuttingDown = false;
@@ -84,7 +94,7 @@ function removeClientFromRoom(room, ws, roomHash) {
     const clients = rooms.get(room);
     if (!clients) return;
 
-    clients.delete(ws);
+    if (!clients.delete(ws)) return;
     if (clients.size === 0) {
         rooms.delete(room);
         console.log(`[relay] roomHash=${roomHash} 已无连接，清理`);
@@ -213,12 +223,23 @@ wss.on('connection', (ws, req) => {
     });
 
     try {
-        ws.send(JSON.stringify({
-            type: 'room_info',
-            room,
-            connections: roomSize,
-            timestamp: Date.now()
-        }));
+        ws.send(
+            JSON.stringify({
+                type: 'room_info',
+                room,
+                connections: roomSize,
+                timestamp: Date.now()
+            }),
+            (err) => {
+                if (!err) return;
+                console.error(
+                    `[relay] [${connId}] room_info 异步发送失败:`,
+                    safeLogValue(err.message)
+                );
+                removeClientFromRoom(room, ws, roomHash);
+                ws.terminate();
+            }
+        );
     } catch (err) {
         console.error(`[relay] [${connId}] room_info 发送失败:`, safeLogValue(err.message));
         removeClientFromRoom(room, ws, roomHash);
@@ -323,7 +344,8 @@ httpServer.listen(PORT, () => {
         `[relay] 限制: maxPayload=${MAX_PAYLOAD_BYTES} bytes, `
         + `maxRoomConnections=${MAX_ROOM_CONNECTIONS}, `
         + `maxTotalConnections=${MAX_TOTAL_CONNECTIONS}, `
-        + `maxMessages=${MAX_MESSAGES_PER_WINDOW}/${RATE_LIMIT_WINDOW_MS}ms`
+        + `maxMessages=${MAX_MESSAGES_PER_WINDOW}/${RATE_LIMIT_WINDOW_MS}ms, `
+        + `heartbeat=${HEARTBEAT_INTERVAL_MS}ms`
     );
     console.log(
         RELAY_TOKEN

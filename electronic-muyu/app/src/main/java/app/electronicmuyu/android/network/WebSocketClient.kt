@@ -31,6 +31,24 @@ class WebSocketClient(
         private const val TAG = "ElectronicMuyu"
         private const val INITIAL_RETRY_DELAY_MS = 1_000L
         private const val MAX_RETRY_DELAY_MS = 60_000L
+
+        internal fun retryDelayForAttempt(attempt: Int): Long {
+            val delayMs = INITIAL_RETRY_DELAY_MS * (1L shl attempt.coerceIn(0, 6))
+            return delayMs.coerceAtMost(MAX_RETRY_DELAY_MS)
+        }
+
+        internal fun disconnectReasonForCloseCode(code: Int): DisconnectReason {
+            return when (code) {
+                4000, 4001, 4002, 4003, 1003, 1009 -> DisconnectReason.SERVER_REJECTED
+                4008 -> DisconnectReason.RATE_LIMITED
+                else -> DisconnectReason.SERVER_CLOSED
+            }
+        }
+
+        internal fun shouldReconnect(reason: DisconnectReason): Boolean {
+            return reason == DisconnectReason.NETWORK_ERROR ||
+                reason == DisconnectReason.SERVER_CLOSED
+        }
     }
 
     enum class DisconnectReason(val label: String) {
@@ -43,6 +61,7 @@ class WebSocketClient(
         SERVER_CLOSED("server_closed"),
         SERVER_REJECTED("server_rejected"),
         RATE_LIMITED("rate_limited"),
+        SERVICE_START_FAILED("service_start_failed"),
         SERVICE_TIMEOUT("service_timeout"),
         SERVICE_DESTROYED("service_destroyed"),
         INVALID_CONFIG("invalid_config"),
@@ -329,7 +348,7 @@ class WebSocketClient(
         val reconnectPairId = pairId
 
         reconnectJob = scope.launch {
-            val delayMs = calculateDelay(retryAttempt)
+            val delayMs = retryDelayForAttempt(retryAttempt)
             retryAttempt++
             _isReconnecting.value = true
             _connectionState.value = ConnectionState.RECONNECTING
@@ -338,19 +357,6 @@ class WebSocketClient(
             delay(delayMs)
             reconnectJob = null
             connect(url, reconnectDeviceId, reconnectPairId, force = true)
-        }
-    }
-
-    private fun calculateDelay(attempt: Int): Long {
-        val delayMs = INITIAL_RETRY_DELAY_MS * (1L shl attempt.coerceAtMost(6))
-        return delayMs.coerceAtMost(MAX_RETRY_DELAY_MS)
-    }
-
-    private fun disconnectReasonForCloseCode(code: Int): DisconnectReason {
-        return when (code) {
-            4000, 4001, 4002, 4003, 1003, 1009 -> DisconnectReason.SERVER_REJECTED
-            4008 -> DisconnectReason.RATE_LIMITED
-            else -> DisconnectReason.SERVER_CLOSED
         }
     }
 
@@ -380,7 +386,4 @@ class WebSocketClient(
         _lastDisconnectAtMillis.value = System.currentTimeMillis()
     }
 
-    private fun shouldReconnect(reason: DisconnectReason): Boolean {
-        return reason == DisconnectReason.NETWORK_ERROR || reason == DisconnectReason.SERVER_CLOSED
-    }
 }

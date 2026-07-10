@@ -2,8 +2,8 @@ package app.electronicmuyu.android.viewmodel
 
 import android.app.Application
 import android.content.Intent
-import android.net.Uri
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.electronicmuyu.android.audio.SoundManager
@@ -92,6 +92,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
+            try {
+                if (localDataStore.purgeUnsafeConnectionConfig()) {
+                    MuyuConnectionRepository.setLastError("已移除不安全的旧连接配置")
+                }
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("旧连接配置安全检查失败")
+            }
+        }
+        viewModelScope.launch {
             localDataStore.meriCount.collect { _meriCount.value = it }
         }
         viewModelScope.launch {
@@ -126,11 +135,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             combine(
                 MuyuConnectionRepository.pendingReceivedTapUiEvents,
-                MuyuConnectionRepository.appForeground
-            ) { events, isForeground ->
-                events to isForeground
-            }.collect { (events, isForeground) ->
-                if (events.isEmpty() || !isForeground) return@collect
+                MuyuConnectionRepository.uiForeground
+            ) { events, isUiForeground ->
+                events to isUiForeground
+            }.collect { (events, isUiForeground) ->
+                if (events.isEmpty() || !isUiForeground) return@collect
 
                 val eventIds = events.map { it.id }
                 try {
@@ -413,13 +422,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         return try {
-            val parsedUri = Uri.parse(trimmedServerUrl)
+            val parsedUri = trimmedServerUrl.toUri()
             val scheme = parsedUri.scheme?.lowercase()
             if (
                 (scheme != "ws" && scheme != "wss") ||
                 parsedUri.host.isNullOrBlank() ||
                 !parsedUri.encodedUserInfo.isNullOrEmpty() ||
-                parsedUri.fragment != null
+                parsedUri.fragment != null ||
+                !LocalDataStore.canStoreConnectionUrl(trimmedServerUrl)
             ) {
                 return null
             }

@@ -15,7 +15,7 @@ import app.electronicmuyu.android.service.MuyuConnectionRepository
 class ElectronicMuyuApplication : Application(), DefaultLifecycleObserver {
 
     override fun onCreate() {
-        super.onCreate()
+        super<Application>.onCreate()
         MuyuConnectionRepository.setAppForeground(false)
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
     }

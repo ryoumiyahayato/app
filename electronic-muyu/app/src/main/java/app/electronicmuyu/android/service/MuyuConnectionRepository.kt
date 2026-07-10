@@ -46,6 +46,9 @@ object MuyuConnectionRepository {
     private val _appForeground = MutableStateFlow(false)
     val appForeground: StateFlow<Boolean> = _appForeground.asStateFlow()
 
+    private val _uiForeground = MutableStateFlow(false)
+    val uiForeground: StateFlow<Boolean> = _uiForeground.asStateFlow()
+
     private val _foregroundNotificationText = MutableStateFlow("电子木鱼未连接")
     val foregroundNotificationText: StateFlow<String> =
         _foregroundNotificationText.asStateFlow()
@@ -83,6 +86,10 @@ object MuyuConnectionRepository {
 
     fun setAppForeground(isForeground: Boolean) {
         _appForeground.value = isForeground
+    }
+
+    fun setUiForeground(isForeground: Boolean) {
+        _uiForeground.value = isForeground
     }
 
     fun setForegroundNotificationText(text: String) {

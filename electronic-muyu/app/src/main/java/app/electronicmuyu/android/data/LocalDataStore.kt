@@ -1,7 +1,6 @@
 package app.electronicmuyu.android.data
 
 import android.content.Context
-import android.net.Uri
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -23,15 +22,9 @@ class LocalDataStore(private val context: Context) {
         private val KEY_DEVICE_ID = stringPreferencesKey("device_id")
         private val KEY_WS_URL = stringPreferencesKey("ws_url")
         private val KEY_ROOM_ID = stringPreferencesKey("room_id")
-        private val SENSITIVE_QUERY_KEYS = setOf(
-            "token",
-            "session",
-            "session_token",
-            "auth",
-            "authorization",
-            "api_key",
-            "apikey"
-        )
+        fun canStoreConnectionUrl(url: String): Boolean {
+            return ConnectionUrlPolicy.isAllowedForPlainStorage(url)
+        }
     }
 
     val meriCount: Flow<Int> = context.dataStore.data.map { prefs ->
@@ -55,11 +48,16 @@ class LocalDataStore(private val context: Context) {
     }
 
     val wsUrl: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[KEY_WS_URL] ?: ""
+        prefs[KEY_WS_URL]?.takeIf(::canStoreConnectionUrl) ?: ""
     }
 
     val roomId: Flow<String> = context.dataStore.data.map { prefs ->
-        prefs[KEY_ROOM_ID] ?: ""
+        val savedUrl = prefs[KEY_WS_URL]
+        if (savedUrl == null || canStoreConnectionUrl(savedUrl)) {
+            prefs[KEY_ROOM_ID] ?: ""
+        } else {
+            ""
+        }
     }
 
     suspend fun getOrCreateDeviceId(createId: () -> String): String {
@@ -130,8 +128,7 @@ class LocalDataStore(private val context: Context) {
      * 当前版本没有 Keystore 凭据配置，因此禁止把 token/session 等秘密写入普通 DataStore。
      */
     suspend fun setConnectionConfig(url: String, roomId: String) {
-        val queryNames = Uri.parse(url).queryParameterNames
-        require(queryNames.none { it.lowercase() in SENSITIVE_QUERY_KEYS }) {
+        require(canStoreConnectionUrl(url)) {
             "Sensitive connection credentials must not be stored in plain DataStore"
         }
 
@@ -146,6 +143,19 @@ class LocalDataStore(private val context: Context) {
             prefs.remove(KEY_WS_URL)
             prefs.remove(KEY_ROOM_ID)
         }
+    }
+
+    suspend fun purgeUnsafeConnectionConfig(): Boolean {
+        var removed = false
+        context.dataStore.edit { prefs ->
+            val savedUrl = prefs[KEY_WS_URL]
+            if (savedUrl != null && !canStoreConnectionUrl(savedUrl)) {
+                prefs.remove(KEY_WS_URL)
+                prefs.remove(KEY_ROOM_ID)
+                removed = true
+            }
+        }
+        return removed
     }
 
     suspend fun clearAllCounts() {
