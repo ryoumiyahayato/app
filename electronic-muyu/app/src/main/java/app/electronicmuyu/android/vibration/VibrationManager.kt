@@ -17,26 +17,16 @@ class VibrationManager(context: Context) {
     }
 
     fun shortTap() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val effect = VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE)
-            vibrator.vibrate(effect)
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(80)
-        }
+        val effect = VibrationEffect.createOneShot(80, VibrationEffect.DEFAULT_AMPLITUDE)
+        vibrator.vibrate(effect)
     }
 
     fun notificationVibrate() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val effect = VibrationEffect.createWaveform(
-                longArrayOf(0, 100, 100, 150),
-                intArrayOf(0, 128, 0, 255),
-                -1
-            )
-            vibrator.vibrate(effect)
-        } else {
-            @Suppress("DEPRECATION")
-            vibrator.vibrate(longArrayOf(0, 100, 100, 150), -1)
-        }
+        val effect = VibrationEffect.createWaveform(
+            longArrayOf(0, 100, 100, 150),
+            intArrayOf(0, 128, 0, 255),
+            -1
+        )
+        vibrator.vibrate(effect)
     }
 }

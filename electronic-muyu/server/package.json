@@ -2,11 +2,16 @@
   "name": "electronic-muyu-relay",
   "version": "0.1.0",
   "private": true,
-  "description": "本地开发测试用的 WSS 中转服务 — 不做生产用途",
+  "description": "电子木鱼本地开发与短期公网联调用的最小 WebSocket 中继服务",
   "main": "index.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node index.js",
-    "send": "node send-tap.js"
+    "send": "node send-tap.js",
+    "client": "node test-client.js",
+    "test": "node auto-test.js"
   },
   "dependencies": {
     "ws": "^8.16.0"

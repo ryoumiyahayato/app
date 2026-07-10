@@ -1,0 +1,9 @@
+# Repository-level generated files
+/build_outputs.txt
+
+# Node / Cloudflare generated files
+**/node_modules/
+**/dist/
+**/.wrangler/
+**/.dev.vars
+**/.dev.vars.*

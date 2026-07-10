@@ -1,0 +1,43 @@
+name: Verify Cloudflare Relay
+
+on:
+  push:
+    branches:
+      - main
+      - fix/z-audit-issues-20260710
+    paths:
+      - "electronic-muyu/cloudflare-relay/**"
+      - ".github/workflows/verify-cloudflare-relay.yml"
+  pull_request:
+    paths:
+      - "electronic-muyu/cloudflare-relay/**"
+      - ".github/workflows/verify-cloudflare-relay.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: electronic-muyu/cloudflare-relay
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: electronic-muyu/cloudflare-relay/package-lock.json
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Unit tests and Wrangler dry-run
+        run: npm run check
+
+      - name: Local Durable Object WebSocket integration
+        run: npm run test:integration

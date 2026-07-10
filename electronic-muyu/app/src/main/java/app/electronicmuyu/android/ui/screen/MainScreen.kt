@@ -65,7 +65,6 @@ fun MainScreen(
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // 收到提醒时显示 Snackbar
     LaunchedEffect(lastReceivedEvent) {
         if (lastReceivedEvent != null) {
             snackbarHostState.showSnackbar("对方敲了一下木鱼")
@@ -113,12 +112,10 @@ fun MainScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Connection state indicator
             ConnectionIndicator(state = connectionState)
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Local meri count
             Text(
                 text = "功德",
                 style = MaterialTheme.typography.titleMedium,
@@ -133,12 +130,10 @@ fun MainScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Woodfish button
             WoodfishButton(onTap = onWoodfishTap)
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Received count (placeholder for Phase 3)
             Text(
                 text = "收到提醒：$receivedCount 次",
                 style = MaterialTheme.typography.bodyLarge,
@@ -147,7 +142,6 @@ fun MainScreen(
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Hint text based on connection mode
             val hintText = when (connectionState) {
                 ConnectionState.CONNECTED -> "已连接 — 敲木鱼对方将收到提醒"
                 ConnectionState.CONNECTING -> "正在连接服务…"
@@ -183,11 +177,10 @@ fun MainScreen(
                 }
             }
 
-            // 连接失败时显示具体错误原因
-            if (lastError.isNotEmpty() && (connectionState == ConnectionState.DISCONNECTED || connectionState == ConnectionState.CONNECTION_FAILED)) {
+            if (lastError.isNotBlank()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "错误：$lastError",
+                    text = "提示：$lastError",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
                     textAlign = TextAlign.Center
@@ -208,7 +201,10 @@ private fun WoodfishButton(onTap: () -> Unit) {
     )
 
     Button(
-        onClick = { isPressed = true; onTap() },
+        onClick = {
+            isPressed = true
+            onTap()
+        },
         modifier = Modifier
             .size(200.dp)
             .scale(scale),

@@ -57,6 +57,7 @@ dependencies {
     // Core
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
 
@@ -75,14 +76,16 @@ dependencies {
     // Lifecycle Process (for ProcessLifecycleOwner)
     implementation(libs.androidx.lifecycle.process)
 
-
     // DataStore
     implementation(libs.androidx.datastore.preferences)
 
-    // OkHttp (for WSS in later stages)
+    // OkHttp WebSocket
     implementation(libs.okhttp)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.json)
 }

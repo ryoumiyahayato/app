@@ -1,8 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#FF8C00</color>
-    <color name="muyu_orange">#FF8C00</color>
-    <color name="muyu_orange_dark">#CC7000</color>
-    <color name="text_primary">#1C1B1F</color>
-    <color name="text_secondary">#49454F</color>
+    <color name="ic_launcher_background">#4A2516</color>
 </resources>

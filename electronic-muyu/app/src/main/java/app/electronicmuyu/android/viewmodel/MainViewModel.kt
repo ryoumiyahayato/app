@@ -2,12 +2,9 @@ package app.electronicmuyu.android.viewmodel
 
 import android.app.Application
 import android.content.Intent
-import android.util.Log
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import app.electronicmuyu.android.audio.SoundManager
 import app.electronicmuyu.android.data.LocalDataStore
@@ -20,7 +17,9 @@ import app.electronicmuyu.android.vibration.VibrationManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import okhttp3.Request
 import java.util.UUID
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -42,9 +41,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val notificationEnabled: StateFlow<Boolean> = _notificationEnabled.asStateFlow()
 
     val connectionState: StateFlow<ConnectionState> = MuyuConnectionRepository.connectionState
-
-    private val _lastError = MutableStateFlow("")
-    val lastError: StateFlow<String> = _lastError.asStateFlow()
+    val lastError: StateFlow<String> = MuyuConnectionRepository.lastError
 
     private val _deviceId = MutableStateFlow("")
     val deviceId: StateFlow<String> = _deviceId.asStateFlow()
@@ -78,43 +75,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isServiceRunning: StateFlow<Boolean> = MuyuConnectionRepository.isServiceRunning
     val foregroundNotificationText: StateFlow<String> =
         MuyuConnectionRepository.foregroundNotificationText
+    val isAppInForeground: StateFlow<Boolean> = MuyuConnectionRepository.appForeground
 
-    private val _isRequestingNotificationPermission = MutableStateFlow(false)
-    val isRequestingNotificationPermission: StateFlow<Boolean> =
-        _isRequestingNotificationPermission.asStateFlow()
-
-    val soundManager = SoundManager(application)
-    val vibrationManager = VibrationManager(application)
-
-    private val _isAppInForeground = MutableStateFlow(true)
-    val isAppInForeground: StateFlow<Boolean> = _isAppInForeground.asStateFlow()
+    private val soundManager = SoundManager(application)
+    private val vibrationManager = VibrationManager(application)
+    private var connectionStartPending = false
+    private var connectionRequestGeneration = 0L
 
     companion object {
         const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
         const val DEFAULT_ROOM_ID = "test-room"
-        private const val TAG = "ElectronicMuyu"
-    }
-
-    private val processLifecycleObserver = LifecycleEventObserver { _, event ->
-        when (event) {
-            Lifecycle.Event.ON_START,
-            Lifecycle.Event.ON_RESUME -> {
-                _isAppInForeground.value = true
-                MuyuConnectionRepository.setAppForeground(true)
-                Log.d(TAG, "foreground=true")
-            }
-            Lifecycle.Event.ON_STOP -> {
-                _isAppInForeground.value = false
-                MuyuConnectionRepository.setAppForeground(false)
-                Log.d(TAG, "foreground=false")
-            }
-            else -> Unit
-        }
+        private const val MAX_ROOM_ID_LENGTH = 64
+        private const val MAX_SERVER_URL_LENGTH = 2048
+        private const val MAX_UI_EVENT_AGE_MS = 10_000L
     }
 
     init {
-        ProcessLifecycleOwner.get().lifecycle.addObserver(processLifecycleObserver)
-
+        viewModelScope.launch {
+            try {
+                if (localDataStore.purgeUnsafeConnectionConfig()) {
+                    MuyuConnectionRepository.setLastError("已移除不安全的旧连接配置")
+                }
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("旧连接配置安全检查失败")
+            }
+        }
         viewModelScope.launch {
             localDataStore.meriCount.collect { _meriCount.value = it }
         }
@@ -131,16 +116,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localDataStore.notificationEnabled.collect { _notificationEnabled.value = it }
         }
         viewModelScope.launch {
-            localDataStore.deviceId.collect { savedId ->
-                if (savedId.isEmpty()) {
-                    val newId = UUID.randomUUID().toString()
-                    _deviceId.value = newId
-                    _deviceIdDisplay.value = newId.take(8)
-                    localDataStore.setDeviceId(newId)
-                } else {
-                    _deviceId.value = savedId
-                    _deviceIdDisplay.value = savedId.take(8)
-                }
+            try {
+                resolveDeviceId()
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("无法初始化设备标识")
             }
         }
         viewModelScope.launch {
@@ -154,123 +133,272 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            MuyuConnectionRepository.receivedTapEvents.collect { timestamp ->
-                _lastReceivedTime.value = timestamp
-                if (MuyuConnectionRepository.appForeground.value) {
-                    _lastReceivedEvent.value = timestamp
-                    playSoundAndVibrate()
+            combine(
+                MuyuConnectionRepository.pendingReceivedTapUiEvents,
+                MuyuConnectionRepository.uiForeground
+            ) { events, isUiForeground ->
+                events to isUiForeground
+            }.collect { (events, isUiForeground) ->
+                if (events.isEmpty() || !isUiForeground) return@collect
+
+                val eventIds = events.map { it.id }
+                try {
+                    val now = System.currentTimeMillis()
+                    events.forEach { event ->
+                        val age = now - event.receivedAtMillis
+                        if (age in 0L..MAX_UI_EVENT_AGE_MS) {
+                            _lastReceivedTime.value = event.receivedAtMillis
+                            _lastReceivedEvent.value = event.id
+                            playSoundAndVibrate()
+                        }
+                    }
+                } finally {
+                    MuyuConnectionRepository.consumeReceivedTapUiEvents(eventIds)
                 }
             }
         }
         viewModelScope.launch {
             MuyuConnectionRepository.isServiceRunning.collect { isRunning ->
-                if (!isRunning) {
-                    _wsEnabled.value = false
-                }
+                _wsEnabled.value = isRunning
             }
         }
     }
 
     fun startConnection() {
-        val deviceIdVal = _deviceId.value
-        if (deviceIdVal.isEmpty()) {
-            MuyuConnectionRepository.setDisconnectReason(
-                WebSocketClient.DisconnectReason.INVALID_CONFIG,
-                System.currentTimeMillis()
-            )
+        if (
+            connectionStartPending ||
+            _wsEnabled.value ||
+            MuyuConnectionRepository.isServiceRunning.value
+        ) {
             return
         }
 
-        val serverUrlVal = _serverUrl.value
-        val roomIdVal = _roomId.value
-        val fullUrl = "${serverUrlVal}?room=${roomIdVal}"
+        val requestGeneration = ++connectionRequestGeneration
+        connectionStartPending = true
+        MuyuConnectionRepository.setLastError("")
+        MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
 
-        _wsEnabled.value = true
+        val currentDeviceId = _deviceId.value
+        if (currentDeviceId.isNotBlank()) {
+            startConnectionWithDeviceId(currentDeviceId, requestGeneration)
+            connectionStartPending = false
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                val resolvedDeviceId = resolveDeviceId()
+                if (requestGeneration == connectionRequestGeneration) {
+                    startConnectionWithDeviceId(resolvedDeviceId, requestGeneration)
+                }
+            } catch (_: Exception) {
+                if (requestGeneration == connectionRequestGeneration) {
+                    failConnectionStart("无法初始化设备标识")
+                }
+            } finally {
+                if (requestGeneration == connectionRequestGeneration) {
+                    connectionStartPending = false
+                }
+            }
+        }
+    }
+
+    private fun startConnectionWithDeviceId(
+        deviceIdValue: String,
+        requestGeneration: Long
+    ) {
+        if (requestGeneration != connectionRequestGeneration) return
+
+        val roomIdValue = _roomId.value.trim()
+        val fullUrl = buildWebSocketUrl(_serverUrl.value, roomIdValue)
+
+        if (deviceIdValue.isBlank() || fullUrl == null) {
+            failConnectionStart("连接配置无效，请检查服务器地址和房间 ID")
+            return
+        }
+
+        MuyuConnectionRepository.setLastError("")
         MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
 
         val context = getApplication<Application>()
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_START_CONNECT
             putExtra(MuyuForegroundService.EXTRA_SERVER_URL, fullUrl)
-            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdVal)
-            putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdVal)
+            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdValue)
+            putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdValue)
         }
-        ContextCompat.startForegroundService(context, intent)
+
+        try {
+            ContextCompat.startForegroundService(context, intent)
+            if (requestGeneration == connectionRequestGeneration) {
+                _wsEnabled.value = true
+            }
+        } catch (_: Exception) {
+            if (requestGeneration == connectionRequestGeneration) {
+                failConnectionStart("无法启动连接服务")
+            }
+        }
+    }
+
+    private fun failConnectionStart(message: String) {
+        _wsEnabled.value = false
+        MuyuConnectionRepository.setServiceRunning(false)
+        MuyuConnectionRepository.setReconnecting(false)
+        MuyuConnectionRepository.setLastError(message)
+        MuyuConnectionRepository.setDisconnectReason(
+            WebSocketClient.DisconnectReason.INVALID_CONFIG,
+            System.currentTimeMillis()
+        )
+        MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+        MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
+    }
+
+    private suspend fun resolveDeviceId(): String {
+        val resolvedId = localDataStore.getOrCreateDeviceId { UUID.randomUUID().toString() }
+        _deviceId.value = resolvedId
+        _deviceIdDisplay.value = resolvedId.take(8)
+        return resolvedId
     }
 
     fun stopConnection() {
+        connectionRequestGeneration++
+        connectionStartPending = false
         _wsEnabled.value = false
+        if (!MuyuConnectionRepository.isServiceRunning.value) {
+            MuyuConnectionRepository.setReconnecting(false)
+            MuyuConnectionRepository.setLastReconnectResult("stopped: user_action")
+            MuyuConnectionRepository.setDisconnectReason(
+                WebSocketClient.DisconnectReason.USER_ACTION,
+                System.currentTimeMillis()
+            )
+            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
+            return
+        }
+
         val context = getApplication<Application>()
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_DISCONNECT
         }
-        context.startService(intent)
+        try {
+            context.startService(intent)
+        } catch (_: Exception) {
+            MuyuConnectionRepository.setServiceRunning(false)
+            MuyuConnectionRepository.setReconnecting(false)
+            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
+        }
     }
 
     fun onTap() {
-        val newCount = _meriCount.value + 1
-        _meriCount.value = newCount
-        _lastTappedTime.value = System.currentTimeMillis()
-
-        viewModelScope.launch {
-            localDataStore.setMeriCount(newCount)
-        }
-
+        val timestamp = System.currentTimeMillis()
+        _lastTappedTime.value = timestamp
         playSoundAndVibrate()
 
-        if (MuyuConnectionRepository.isServiceRunning.value) {
+        viewModelScope.launch {
+            try {
+                localDataStore.incrementMeriCount()
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("本机功德计数保存失败")
+            }
+        }
+
+        if (
+            MuyuConnectionRepository.isServiceRunning.value &&
+            MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED
+        ) {
             val context = getApplication<Application>()
             val intent = Intent(context, MuyuForegroundService::class.java).apply {
                 action = MuyuForegroundService.ACTION_SEND_TAP
-                putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, System.currentTimeMillis())
+                putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, timestamp)
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("提醒未发送：连接服务不可用")
+                MuyuConnectionRepository.setServiceRunning(false)
+                MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            }
         }
     }
 
     fun setSoundEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            _soundEnabled.value = enabled
-            localDataStore.setSoundEnabled(enabled)
+            try {
+                localDataStore.setSoundEnabled(enabled)
+                _soundEnabled.value = enabled
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("声音设置保存失败")
+            }
         }
     }
 
     fun setVibrationEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            _vibrationEnabled.value = enabled
-            localDataStore.setVibrationEnabled(enabled)
+            try {
+                localDataStore.setVibrationEnabled(enabled)
+                _vibrationEnabled.value = enabled
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("震动设置保存失败")
+            }
         }
     }
 
     fun setNotificationEnabled(enabled: Boolean) {
         viewModelScope.launch {
-            _notificationEnabled.value = enabled
-            localDataStore.setNotificationEnabled(enabled)
+            try {
+                localDataStore.setNotificationEnabled(enabled)
+                _notificationEnabled.value = enabled
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("通知设置保存失败")
+            }
         }
     }
 
-    fun saveConnectionConfig(serverUrl: String, roomId: String) {
-        viewModelScope.launch {
-            localDataStore.setWsUrl(serverUrl)
-            localDataStore.setRoomId(roomId)
+    suspend fun saveConnectionConfig(serverUrl: String, roomId: String): Boolean {
+        val normalizedUrl = serverUrl.trim()
+        val normalizedRoomId = roomId.trim()
+        if (buildWebSocketUrl(normalizedUrl, normalizedRoomId) == null) {
+            MuyuConnectionRepository.setLastError("连接配置无效，未保存")
+            return false
+        }
+
+        return try {
+            localDataStore.setConnectionConfig(normalizedUrl, normalizedRoomId)
+            _serverUrl.value = normalizedUrl
+            _roomId.value = normalizedRoomId
+            MuyuConnectionRepository.setLastError("")
+            true
+        } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("连接配置保存失败")
+            false
         }
     }
 
-    fun resetConnectionConfig() {
-        viewModelScope.launch {
-            localDataStore.setWsUrl("")
-            localDataStore.setRoomId("")
+    suspend fun resetConnectionConfig(): Boolean {
+        return try {
+            localDataStore.resetConnectionConfig()
+            _serverUrl.value = DEFAULT_SERVER_URL
+            _roomId.value = DEFAULT_ROOM_ID
+            MuyuConnectionRepository.setLastError("")
+            true
+        } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("默认连接配置恢复失败")
+            false
         }
     }
 
     fun clearAllCounts() {
         viewModelScope.launch {
-            _meriCount.value = 0
-            _receivedCount.value = 0
-            _lastTappedTime.value = null
-            _lastReceivedTime.value = null
-            _lastReceivedEvent.value = null
-            localDataStore.clearAllCounts()
+            try {
+                localDataStore.clearAllCounts()
+                MuyuConnectionRepository.clearPendingReceivedTapUiEvents()
+                _lastTappedTime.value = null
+                _lastReceivedTime.value = null
+                _lastReceivedEvent.value = null
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("计数清空失败")
+            }
         }
     }
 
@@ -280,6 +408,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun checkNotificationPermissionState(): Boolean {
         return NotificationHelper.hasNotificationPermission(getApplication())
+    }
+
+    private fun buildWebSocketUrl(serverUrl: String, roomId: String): String? {
+        val trimmedServerUrl = serverUrl.trim()
+        val trimmedRoomId = roomId.trim()
+        if (
+            trimmedServerUrl.isEmpty() ||
+            trimmedServerUrl.length > MAX_SERVER_URL_LENGTH ||
+            !isValidRoomId(trimmedRoomId)
+        ) {
+            return null
+        }
+
+        return try {
+            val parsedUri = trimmedServerUrl.toUri()
+            val scheme = parsedUri.scheme?.lowercase()
+            if (
+                (scheme != "ws" && scheme != "wss") ||
+                parsedUri.host.isNullOrBlank() ||
+                !parsedUri.encodedUserInfo.isNullOrEmpty() ||
+                parsedUri.fragment != null ||
+                !LocalDataStore.canStoreConnectionUrl(trimmedServerUrl)
+            ) {
+                return null
+            }
+
+            val builder = parsedUri.buildUpon().clearQuery()
+            parsedUri.queryParameterNames
+                .filterNot { it == "room" }
+                .forEach { name ->
+                    parsedUri.getQueryParameters(name).forEach { value ->
+                        builder.appendQueryParameter(name, value)
+                    }
+                }
+            builder.appendQueryParameter("room", trimmedRoomId)
+            val fullUrl = builder.build().toString()
+
+            Request.Builder().url(fullUrl).build()
+            fullUrl
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun isValidRoomId(roomId: String): Boolean {
+        return roomId.isNotEmpty() &&
+            roomId.length <= MAX_ROOM_ID_LENGTH &&
+            roomId.none { it.code in 0..31 || it.code == 127 }
     }
 
     private fun playSoundAndVibrate() {
@@ -292,7 +468,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        ProcessLifecycleOwner.get().lifecycle.removeObserver(processLifecycleObserver)
+        connectionRequestGeneration++
+        soundManager.release()
         super.onCleared()
     }
 }
