@@ -96,6 +96,11 @@ class MuyuForegroundService : Service() {
         when (intent?.action) {
             ACTION_START_CONNECT -> {
                 readConnectionExtras(intent)
+
+                // The Service object is already running at this point. Publish that state before
+                // startForeground so an asynchronous foreground-start failure can emit true -> false
+                // and reliably roll back ViewModel UI that optimistically requested the Service.
+                MuyuConnectionRepository.setServiceRunning(true)
                 try {
                     startForeground(
                         NOTIFICATION_ID,
@@ -103,6 +108,10 @@ class MuyuForegroundService : Service() {
                     )
                 } catch (error: Exception) {
                     Log.e(TAG, "failed to start foreground connection service", error)
+                    MuyuConnectionRepository.setServiceRunning(false)
+                    MuyuConnectionRepository.setReconnecting(false)
+                    MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+                    MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
                     MuyuConnectionRepository.setLastError("无法启动前台连接通知")
                     MuyuConnectionRepository.setDisconnectReason(
                         WebSocketClient.DisconnectReason.SERVICE_START_FAILED,
@@ -113,7 +122,6 @@ class MuyuForegroundService : Service() {
                     return START_NOT_STICKY
                 }
                 foregroundStarted = true
-                MuyuConnectionRepository.setServiceRunning(true)
                 connectIfConfigValid()
             }
 
@@ -199,12 +207,13 @@ class MuyuForegroundService : Service() {
 
     private suspend fun handleRemoteTap() {
         val receivedAtMillis = System.currentTimeMillis()
-        val appInForeground = MuyuConnectionRepository.appForeground.value
+        val uiInForeground = MuyuConnectionRepository.uiForeground.value
 
-        // 先记录 UI 事件，避免 DataStore I/O 延迟前台声音、震动和 Snackbar。
+        // Activity visibility is the delivery source of truth. ProcessLifecycleOwner intentionally
+        // delays its background transition, which can otherwise swallow a tap just after Home/lock.
         MuyuConnectionRepository.recordReceivedTap(
             receivedAtMillis = receivedAtMillis,
-            enqueueForForegroundUi = appInForeground
+            enqueueForForegroundUi = uiInForeground
         )
 
         try {
@@ -214,8 +223,8 @@ class MuyuForegroundService : Service() {
             MuyuConnectionRepository.setLastError("收到提醒，但计数保存失败")
         }
 
-        if (appInForeground) {
-            Log.d(TAG, "foreground tap received, queued for in-app feedback")
+        if (uiInForeground) {
+            Log.d(TAG, "visible UI tap received, queued for in-app feedback")
             return
         }
 
@@ -227,13 +236,13 @@ class MuyuForegroundService : Service() {
         }
 
         if (notificationEnabled) {
-            Log.d(TAG, "background tap received, sending notification")
+            Log.d(TAG, "non-visible UI tap received, sending notification")
             val sent = NotificationHelper.sendMeritReminderNotification(applicationContext)
             if (!sent) {
                 MuyuConnectionRepository.setLastError("收到提醒，但系统通知未能送达")
             }
         } else {
-            Log.d(TAG, "background tap received while notification preference is disabled")
+            Log.d(TAG, "non-visible UI tap received while notification preference is disabled")
         }
     }
 
