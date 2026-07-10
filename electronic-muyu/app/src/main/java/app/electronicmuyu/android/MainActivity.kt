@@ -20,18 +20,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
 import app.electronicmuyu.android.notification.NotificationHelper
 import app.electronicmuyu.android.ui.screen.MainScreen
 import app.electronicmuyu.android.ui.screen.SettingsScreen
 import app.electronicmuyu.android.ui.theme.ElectronicMuyuTheme
 import app.electronicmuyu.android.viewmodel.MainViewModel
-import androidx.navigation.compose.NavHost
-import androidx.navigation.compose.composable
-import androidx.navigation.compose.rememberNavController
 
 class MainActivity : ComponentActivity() {
 
-    // 通知权限申请结果回调
     private var onPermissionResult: ((Boolean) -> Unit)? = null
 
     private val requestPermissionLauncher = registerForActivityResult(
@@ -44,7 +43,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 创建通知渠道（应用启动时即可创建，不弹权限框）
         NotificationHelper.createNotificationChannel(this)
 
         enableEdgeToEdge()
@@ -58,22 +56,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * 请求通知权限（Android 13+）
-     */
     private fun requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             requestPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
-            // Android 12 及以下无运行时权限，直接回调成功
             onPermissionResult?.invoke(true)
             onPermissionResult = null
         }
     }
 
-    /**
-     * 打开应用通知设置页
-     */
     fun openNotificationSettings() {
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", packageName, null)
@@ -108,7 +99,6 @@ fun MuyuApp(
 
     val navController = rememberNavController()
 
-    // 当前通知权限状态（实时查询系统）
     var notificationPermissionGranted by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -154,13 +144,10 @@ fun MuyuApp(
                 onVibrationToggle = { viewModel.setVibrationEnabled(it) },
                 onNotificationToggle = { enabled ->
                     if (enabled) {
-                        // 用户尝试开启通知
                         if (viewModel.checkNotificationPermissionState()) {
-                            // 已有权限，直接开启
                             viewModel.setNotificationEnabled(true)
                             notificationPermissionGranted = true
                         } else {
-                            // 无权限，发起申请
                             onRequestNotificationPermission { isGranted ->
                                 notificationPermissionGranted = isGranted
                                 if (isGranted) {
@@ -169,11 +156,15 @@ fun MuyuApp(
                             }
                         }
                     } else {
-                        // 用户关闭通知
                         viewModel.setNotificationEnabled(false)
                     }
                 },
-                onOpenNotificationSettings = { /* 暂不实现复杂设置页 */ },
+                onOpenNotificationSettings = {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", context.packageName, null)
+                    }
+                    context.startActivity(intent)
+                },
                 onSendTestNotification = {
                     if (viewModel.checkNotificationPermissionState()) {
                         notificationPermissionGranted = true
@@ -193,19 +184,17 @@ fun MuyuApp(
                 },
                 onConnect = { viewModel.startConnection() },
                 onDisconnect = { viewModel.stopConnection() },
-                onSaveConfig = { serverUrl, roomId -> viewModel.saveConnectionConfig(serverUrl, roomId) },
+                onSaveConfig = { configuredServerUrl, configuredRoomId ->
+                    viewModel.saveConnectionConfig(configuredServerUrl, configuredRoomId)
+                },
                 onResetDefaults = { viewModel.resetConnectionConfig() },
                 onClearCounts = { viewModel.clearAllCounts() },
                 onNavigateBack = { navController.popBackStack() }
             )
 
-            // 每次进入设置页刷新通知权限状态
             LaunchedEffect(Unit) {
                 notificationPermissionGranted = viewModel.checkNotificationPermissionState()
             }
         }
     }
 }
-
-
-
