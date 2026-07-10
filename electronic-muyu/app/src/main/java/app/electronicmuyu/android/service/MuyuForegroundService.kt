@@ -21,6 +21,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class MuyuForegroundService : Service() {
@@ -28,12 +29,11 @@ class MuyuForegroundService : Service() {
     private lateinit var localDataStore: LocalDataStore
     private lateinit var wsClient: WebSocketClient
 
-    private var latestReceivedCount = 0
-    private var latestNotificationEnabled = false
-    private var currentServerUrl = DEFAULT_WS_URL
-    private var currentPairId = DEFAULT_PAIR_ID
+    private var currentServerUrl = ""
+    private var currentPairId = ""
     private var currentDeviceId = ""
     private var stopReason: WebSocketClient.DisconnectReason? = null
+    private var foregroundStarted = false
 
     override fun onCreate() {
         super.onCreate()
@@ -41,7 +41,6 @@ class MuyuForegroundService : Service() {
         wsClient = WebSocketClient(serviceScope)
         NotificationHelper.createNotificationChannel(applicationContext)
         createConnectionNotificationChannel()
-        MuyuConnectionRepository.setServiceRunning(true)
 
         wsClient.onTapReceived = { event ->
             serviceScope.launch {
@@ -50,15 +49,11 @@ class MuyuForegroundService : Service() {
         }
 
         serviceScope.launch {
-            localDataStore.receivedCount.collectLatest { latestReceivedCount = it }
-        }
-        serviceScope.launch {
-            localDataStore.notificationEnabled.collectLatest { latestNotificationEnabled = it }
-        }
-        serviceScope.launch {
             wsClient.connectionState.collectLatest { state ->
                 MuyuConnectionRepository.setConnectionState(state)
-                updateForegroundNotification(state)
+                if (foregroundStarted) {
+                    updateForegroundNotification(state)
+                }
             }
         }
         serviceScope.launch {
@@ -72,6 +67,9 @@ class MuyuForegroundService : Service() {
                     reason = reason,
                     atMillis = wsClient.lastDisconnectAtMillis.value
                 )
+                if (stopReason == null && foregroundStarted && isTerminalReason(reason)) {
+                    disconnectAndStop(reason)
+                }
             }
         }
         serviceScope.launch {
@@ -83,10 +81,14 @@ class MuyuForegroundService : Service() {
             }
         }
         serviceScope.launch {
-            wsClient.isReconnecting.collectLatest { MuyuConnectionRepository.setReconnecting(it) }
+            wsClient.isReconnecting.collectLatest {
+                MuyuConnectionRepository.setReconnecting(it)
+            }
         }
         serviceScope.launch {
-            wsClient.lastReconnectResult.collectLatest { MuyuConnectionRepository.setLastReconnectResult(it) }
+            wsClient.lastReconnectResult.collectLatest {
+                MuyuConnectionRepository.setLastReconnectResult(it)
+            }
         }
     }
 
@@ -94,22 +96,43 @@ class MuyuForegroundService : Service() {
         when (intent?.action) {
             ACTION_START_CONNECT -> {
                 readConnectionExtras(intent)
-                startForeground(NOTIFICATION_ID, buildConnectionNotification(ConnectionState.CONNECTING))
+                startForeground(
+                    NOTIFICATION_ID,
+                    buildConnectionNotification(ConnectionState.CONNECTING)
+                )
+                foregroundStarted = true
                 MuyuConnectionRepository.setServiceRunning(true)
                 connectIfConfigValid()
             }
+
             ACTION_SEND_TAP -> {
-                val timestamp = intent.getLongExtra(EXTRA_TIMESTAMP, System.currentTimeMillis())
-                wsClient.sendTap(timestamp)
+                if (
+                    foregroundStarted &&
+                    MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED
+                ) {
+                    val timestamp = intent.getLongExtra(
+                        EXTRA_TIMESTAMP,
+                        System.currentTimeMillis()
+                    )
+                    wsClient.sendTap(timestamp)
+                } else {
+                    Log.d(TAG, "send tap ignored: service is not connected")
+                }
             }
+
             ACTION_DISCONNECT -> {
                 disconnectAndStop(WebSocketClient.DisconnectReason.USER_ACTION)
             }
+
             ACTION_REFRESH_NOTIFICATION -> {
-                updateForegroundNotification(MuyuConnectionRepository.connectionState.value)
+                if (foregroundStarted) {
+                    updateForegroundNotification(MuyuConnectionRepository.connectionState.value)
+                }
             }
+
             else -> {
-                startForeground(NOTIFICATION_ID, buildConnectionNotification(MuyuConnectionRepository.connectionState.value))
+                Log.d(TAG, "service started without a supported action; stopping")
+                stopSelf(startId)
             }
         }
         return START_NOT_STICKY
@@ -118,11 +141,13 @@ class MuyuForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        if (stopReason == null) {
-            wsClient.disconnect(WebSocketClient.DisconnectReason.SERVICE_DESTROYED)
-        }
+        val finalReason = stopReason ?: WebSocketClient.DisconnectReason.SERVICE_DESTROYED
+        wsClient.shutdown(finalReason)
+        foregroundStarted = false
         MuyuConnectionRepository.setServiceRunning(false)
+        MuyuConnectionRepository.setReconnecting(false)
         MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+        MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -133,20 +158,19 @@ class MuyuForegroundService : Service() {
     }
 
     private fun readConnectionExtras(intent: Intent) {
-        currentServerUrl = intent.getStringExtra(EXTRA_SERVER_URL).orEmpty().ifEmpty { DEFAULT_WS_URL }
-        currentPairId = intent.getStringExtra(EXTRA_PAIR_ID).orEmpty().ifEmpty { DEFAULT_PAIR_ID }
+        currentServerUrl = intent.getStringExtra(EXTRA_SERVER_URL).orEmpty()
+        currentPairId = intent.getStringExtra(EXTRA_PAIR_ID).orEmpty()
         currentDeviceId = intent.getStringExtra(EXTRA_DEVICE_ID).orEmpty()
     }
 
     private fun connectIfConfigValid() {
-        if (currentDeviceId.isBlank() || currentServerUrl.isBlank()) {
+        if (
+            currentDeviceId.isBlank() ||
+            currentServerUrl.isBlank() ||
+            currentPairId.isBlank()
+        ) {
             Log.e(TAG, "invalid foreground service websocket config")
-            MuyuConnectionRepository.setDisconnectReason(
-                WebSocketClient.DisconnectReason.INVALID_CONFIG,
-                System.currentTimeMillis()
-            )
             MuyuConnectionRepository.setLastError("连接配置无效")
-            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
             disconnectAndStop(WebSocketClient.DisconnectReason.INVALID_CONFIG)
             return
         }
@@ -160,26 +184,38 @@ class MuyuForegroundService : Service() {
     }
 
     private suspend fun handleRemoteTap(timestamp: Long) {
-        val newCount = latestReceivedCount + 1
-        latestReceivedCount = newCount
-        localDataStore.setReceivedCount(newCount)
+        localDataStore.incrementReceivedCount()
         MuyuConnectionRepository.emitReceivedTap(timestamp)
 
-        if (!MuyuConnectionRepository.appForeground.value && latestNotificationEnabled) {
+        val notificationEnabled = localDataStore.notificationEnabled.first()
+        val appInForeground = MuyuConnectionRepository.appForeground.value
+        if (!appInForeground && notificationEnabled) {
             Log.d(TAG, "background tap received, sending notification")
             NotificationHelper.sendMeritReminderNotification(applicationContext)
         } else {
-            Log.d(TAG, "tap received without system notification foreground=${MuyuConnectionRepository.appForeground.value}")
+            Log.d(TAG, "tap received without system notification foreground=$appInForeground")
         }
     }
 
     private fun disconnectAndStop(reason: WebSocketClient.DisconnectReason) {
+        if (stopReason != null) return
         stopReason = reason
         wsClient.disconnect(reason)
         MuyuConnectionRepository.setServiceRunning(false)
+        MuyuConnectionRepository.setReconnecting(false)
         MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
+        if (foregroundStarted) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            foregroundStarted = false
+        }
         stopSelf()
+    }
+
+    private fun isTerminalReason(reason: WebSocketClient.DisconnectReason): Boolean {
+        return reason == WebSocketClient.DisconnectReason.INVALID_CONFIG ||
+            reason == WebSocketClient.DisconnectReason.SERVER_REJECTED ||
+            reason == WebSocketClient.DisconnectReason.RATE_LIMITED
     }
 
     private fun createConnectionNotificationChannel() {
@@ -190,14 +226,16 @@ class MuyuForegroundService : Service() {
         ).apply {
             description = "电子木鱼 WebSocket 连接状态"
         }
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notificationManager =
+            getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.createNotificationChannel(channel)
     }
 
     private fun updateForegroundNotification(state: ConnectionState) {
         val text = foregroundTextForState(state)
         MuyuConnectionRepository.setForegroundNotificationText(text)
-        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        val notificationManager =
+            getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         notificationManager.notify(NOTIFICATION_ID, buildConnectionNotification(state))
     }
 
@@ -246,7 +284,5 @@ class MuyuForegroundService : Service() {
         private const val CONNECTION_CHANNEL_NAME = "木鱼连接"
         private const val NOTIFICATION_ID = 2001
         private const val TAG = "ElectronicMuyu"
-        private const val DEFAULT_WS_URL = "ws://192.168.96.33:8443?room=test-room"
-        private const val DEFAULT_PAIR_ID = "test-room"
     }
 }
