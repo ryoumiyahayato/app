@@ -6,7 +6,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "send": "node send-tap.js"
+    "send": "node send-tap.js",
+    "client": "node test-client.js",
+    "test": "node auto-test.js"
   },
   "dependencies": {
     "ws": "^8.16.0"
