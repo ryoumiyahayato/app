@@ -14,7 +14,8 @@ data class ReceivedTapUiEvent(
 )
 
 object MuyuConnectionRepository {
-    private const val MAX_PENDING_UI_EVENTS = 16
+    // 高于 relay 当前允许的 20 条/10 秒窗口，避免合法突发消息丢失前台反馈。
+    private const val MAX_PENDING_UI_EVENTS = 32
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -89,10 +90,6 @@ object MuyuConnectionRepository {
         _foregroundNotificationText.value = text
     }
 
-    /**
-     * 所有 tap 都更新最近接收时间；只有在接收瞬间位于前台的 tap 才进入 UI 待处理队列。
-     * 队列有上限，避免异常高频消息导致进程内存持续增长。
-     */
     fun recordReceivedTap(receivedAtMillis: Long, enqueueForForegroundUi: Boolean) {
         _lastTapReceivedAtMillis.value = receivedAtMillis
         if (!enqueueForForegroundUi) return
