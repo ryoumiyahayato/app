@@ -78,6 +78,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val soundManager = SoundManager(application)
     private val vibrationManager = VibrationManager(application)
     private var connectionStartPending = false
+    private var connectionRequestGeneration = 0L
 
     companion object {
         const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
@@ -131,30 +132,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startConnection() {
-        if (connectionStartPending) return
-
-        val currentDeviceId = _deviceId.value
-        if (currentDeviceId.isNotBlank()) {
-            startConnectionWithDeviceId(currentDeviceId)
+        if (
+            connectionStartPending ||
+            _wsEnabled.value ||
+            MuyuConnectionRepository.isServiceRunning.value
+        ) {
             return
         }
 
+        val requestGeneration = ++connectionRequestGeneration
         connectionStartPending = true
         MuyuConnectionRepository.setLastError("")
         MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
+
+        val currentDeviceId = _deviceId.value
+        if (currentDeviceId.isNotBlank()) {
+            startConnectionWithDeviceId(currentDeviceId, requestGeneration)
+            connectionStartPending = false
+            return
+        }
+
         viewModelScope.launch {
             try {
                 val resolvedDeviceId = resolveDeviceId()
-                startConnectionWithDeviceId(resolvedDeviceId)
+                if (requestGeneration == connectionRequestGeneration) {
+                    startConnectionWithDeviceId(resolvedDeviceId, requestGeneration)
+                }
             } catch (_: Exception) {
-                failConnectionStart("无法初始化设备标识")
+                if (requestGeneration == connectionRequestGeneration) {
+                    failConnectionStart("无法初始化设备标识")
+                }
             } finally {
-                connectionStartPending = false
+                if (requestGeneration == connectionRequestGeneration) {
+                    connectionStartPending = false
+                }
             }
         }
     }
 
-    private fun startConnectionWithDeviceId(deviceIdValue: String) {
+    private fun startConnectionWithDeviceId(
+        deviceIdValue: String,
+        requestGeneration: Long
+    ) {
+        if (requestGeneration != connectionRequestGeneration) return
+
         val roomIdValue = _roomId.value.trim()
         val fullUrl = buildWebSocketUrl(_serverUrl.value, roomIdValue)
 
@@ -176,9 +197,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         try {
             ContextCompat.startForegroundService(context, intent)
-            _wsEnabled.value = true
+            if (requestGeneration == connectionRequestGeneration) {
+                _wsEnabled.value = true
+            }
         } catch (_: Exception) {
-            failConnectionStart("无法启动连接服务")
+            if (requestGeneration == connectionRequestGeneration) {
+                failConnectionStart("无法启动连接服务")
+            }
         }
     }
 
@@ -203,6 +228,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopConnection() {
+        connectionRequestGeneration++
         connectionStartPending = false
         _wsEnabled.value = false
         if (!MuyuConnectionRepository.isServiceRunning.value) {
@@ -364,6 +390,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        connectionRequestGeneration++
         soundManager.release()
         super.onCleared()
     }
