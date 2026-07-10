@@ -4,6 +4,8 @@
 
 它不保存历史、不做离线补发，也不是聊天或账号后端。
 
+运行时要求：Node.js 22 或更高版本，并优先使用仍处于 LTS 支持期的版本。
+
 ## 快速本地启动
 
 ```bash
@@ -12,7 +14,7 @@ npm ci
 npm start
 ```
 
-首次没有 `package-lock.json` 时可改用 `npm install`。
+仓库已包含 `package-lock.json`，正常情况下必须使用 `npm ci`，不得用未锁定的依赖结果替代验收基线。
 
 默认监听：
 
@@ -41,7 +43,7 @@ GET http://localhost:8443/health
 | `PORT` | `8443` | 1～65535 范围内的监听端口 |
 | `RELAY_TOKEN` | 空 | 可选共享 secret；设置后客户端必须提供相同 token |
 
-当前 Android 端尚未提供 token 输入，因此 6B 初次公网联调不得设置 `RELAY_TOKEN`。
+当前 Android 端尚未提供安全 token 输入，因此 6B 初次公网联调不得设置 `RELAY_TOKEN`。
 
 ## npm 命令
 
@@ -143,13 +145,13 @@ wss://<域名>?room=约定房间名
 RELAY_TOKEN=my-secret npm start
 ```
 
-客户端连接示例：
+测试客户端连接示例：
 
 ```text
 wss://example.com?room=test-room&token=my-secret
 ```
 
-当前 token 位于 URL query 中，可能出现在反向代理访问日志里。正式启用前必须确认代理不会记录完整 query，且 Android 端应隐藏 token 输入并禁止日志输出。
+当前 token 位于 URL query 中，可能出现在反向代理访问日志里。正式启用前必须确认代理不会记录完整 query，并为 Android 增加 Keystore 支持的独立凭据配置。当前 Android 普通连接配置会拒绝把 token、session、auth、api_key 等敏感 query 保存到 DataStore。
 
 ## 测试工具
 
@@ -200,13 +202,13 @@ npm test
 | 服务器地址 | `ws://192.168.1.23:8443` |
 | 房间 ID | `test-room` |
 
-App 会安全追加并编码 room 参数；服务器地址已有 query 时不会生成第二个 `?`。
+App 会安全追加并编码 room 参数；服务器地址已有普通非敏感 query 时不会生成第二个 `?`。
 
 `ws://` 只用于本地或短期公网联调。长期公网地址必须使用 `wss://`。
 
 ## 6B 短期公网联调边界
 
-1. 不设置 `RELAY_TOKEN`，因为当前 Android 尚未支持 token。
+1. 不设置 `RELAY_TOKEN`，因为当前 Android 尚未支持安全 token 存储。
 2. 只临时放行 relay 端口。
 3. 先验证 `/health`，再连接手机。
 4. 验证相同 room 互通、不同 room 隔离、后台和锁屏通知、网络切换重连。
