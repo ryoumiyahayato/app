@@ -3,12 +3,8 @@ package app.electronicmuyu.android.viewmodel
 import android.app.Application
 import android.content.Intent
 import android.net.Uri
-import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.viewModelScope
 import app.electronicmuyu.android.audio.SoundManager
 import app.electronicmuyu.android.data.LocalDataStore
@@ -77,43 +73,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isServiceRunning: StateFlow<Boolean> = MuyuConnectionRepository.isServiceRunning
     val foregroundNotificationText: StateFlow<String> =
         MuyuConnectionRepository.foregroundNotificationText
+    val isAppInForeground: StateFlow<Boolean> = MuyuConnectionRepository.appForeground
 
-    private val _isRequestingNotificationPermission = MutableStateFlow(false)
-    val isRequestingNotificationPermission: StateFlow<Boolean> =
-        _isRequestingNotificationPermission.asStateFlow()
-
-    val soundManager = SoundManager(application)
-    val vibrationManager = VibrationManager(application)
-
-    private val _isAppInForeground = MutableStateFlow(true)
-    val isAppInForeground: StateFlow<Boolean> = _isAppInForeground.asStateFlow()
+    private val soundManager = SoundManager(application)
+    private val vibrationManager = VibrationManager(application)
 
     companion object {
         const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
         const val DEFAULT_ROOM_ID = "test-room"
-        private const val TAG = "ElectronicMuyu"
-    }
-
-    private val processLifecycleObserver = LifecycleEventObserver { _, event ->
-        when (event) {
-            Lifecycle.Event.ON_START,
-            Lifecycle.Event.ON_RESUME -> {
-                _isAppInForeground.value = true
-                MuyuConnectionRepository.setAppForeground(true)
-                Log.d(TAG, "foreground=true")
-            }
-            Lifecycle.Event.ON_STOP -> {
-                _isAppInForeground.value = false
-                MuyuConnectionRepository.setAppForeground(false)
-                Log.d(TAG, "foreground=false")
-            }
-            else -> Unit
-        }
+        private const val MAX_ROOM_ID_LENGTH = 64
     }
 
     init {
-        ProcessLifecycleOwner.get().lifecycle.addObserver(processLifecycleObserver)
-
         viewModelScope.launch {
             localDataStore.meriCount.collect { _meriCount.value = it }
         }
@@ -130,17 +101,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localDataStore.notificationEnabled.collect { _notificationEnabled.value = it }
         }
         viewModelScope.launch {
-            localDataStore.deviceId.collect { savedId ->
-                if (savedId.isEmpty()) {
-                    val newId = UUID.randomUUID().toString()
-                    _deviceId.value = newId
-                    _deviceIdDisplay.value = newId.take(8)
-                    localDataStore.setDeviceId(newId)
-                } else {
-                    _deviceId.value = savedId
-                    _deviceIdDisplay.value = savedId.take(8)
-                }
-            }
+            val resolvedId = localDataStore.getOrCreateDeviceId { UUID.randomUUID().toString() }
+            _deviceId.value = resolvedId
+            _deviceIdDisplay.value = resolvedId.take(8)
         }
         viewModelScope.launch {
             localDataStore.wsUrl.collect { savedUrl ->
@@ -169,12 +132,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startConnection() {
-        val deviceIdVal = _deviceId.value
-        val serverUrlVal = _serverUrl.value
-        val roomIdVal = _roomId.value
-        val fullUrl = buildWebSocketUrl(serverUrlVal, roomIdVal)
+        val deviceIdValue = _deviceId.value
+        val roomIdValue = _roomId.value.trim()
+        val fullUrl = buildWebSocketUrl(_serverUrl.value, roomIdValue)
 
-        if (deviceIdVal.isBlank() || fullUrl == null) {
+        if (deviceIdValue.isBlank() || fullUrl == null) {
             _wsEnabled.value = false
             MuyuConnectionRepository.setLastError("连接配置无效，请检查服务器地址和房间 ID")
             MuyuConnectionRepository.setDisconnectReason(
@@ -193,14 +155,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_START_CONNECT
             putExtra(MuyuForegroundService.EXTRA_SERVER_URL, fullUrl)
-            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdVal.trim())
-            putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdVal)
+            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdValue)
+            putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdValue)
         }
         ContextCompat.startForegroundService(context, intent)
     }
 
     fun stopConnection() {
         _wsEnabled.value = false
+        if (!MuyuConnectionRepository.isServiceRunning.value) {
+            MuyuConnectionRepository.setReconnecting(false)
+            MuyuConnectionRepository.setLastReconnectResult("stopped: user_action")
+            MuyuConnectionRepository.setDisconnectReason(
+                WebSocketClient.DisconnectReason.USER_ACTION,
+                System.currentTimeMillis()
+            )
+            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            return
+        }
+
         val context = getApplication<Application>()
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_DISCONNECT
@@ -209,21 +182,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onTap() {
-        val newCount = _meriCount.value + 1
-        _meriCount.value = newCount
-        _lastTappedTime.value = System.currentTimeMillis()
-
-        viewModelScope.launch {
-            localDataStore.setMeriCount(newCount)
-        }
-
+        val timestamp = System.currentTimeMillis()
+        _lastTappedTime.value = timestamp
         playSoundAndVibrate()
 
-        if (MuyuConnectionRepository.isServiceRunning.value) {
+        viewModelScope.launch {
+            localDataStore.incrementMeriCount()
+        }
+
+        if (
+            MuyuConnectionRepository.isServiceRunning.value &&
+            MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED
+        ) {
             val context = getApplication<Application>()
             val intent = Intent(context, MuyuForegroundService::class.java).apply {
                 action = MuyuForegroundService.ACTION_SEND_TAP
-                putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, System.currentTimeMillis())
+                putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, timestamp)
             }
             context.startService(intent)
         }
@@ -251,9 +225,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveConnectionConfig(serverUrl: String, roomId: String) {
+        val normalizedUrl = serverUrl.trim()
+        val normalizedRoomId = roomId.trim()
+        if (buildWebSocketUrl(normalizedUrl, normalizedRoomId) == null) {
+            MuyuConnectionRepository.setLastError("连接配置无效，未保存")
+            return
+        }
+
         viewModelScope.launch {
-            localDataStore.setWsUrl(serverUrl.trim())
-            localDataStore.setRoomId(roomId.trim())
+            localDataStore.setWsUrl(normalizedUrl)
+            localDataStore.setRoomId(normalizedRoomId)
+            MuyuConnectionRepository.setLastError("")
         }
     }
 
@@ -261,13 +243,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             localDataStore.setWsUrl("")
             localDataStore.setRoomId("")
+            MuyuConnectionRepository.setLastError("")
         }
     }
 
     fun clearAllCounts() {
         viewModelScope.launch {
-            _meriCount.value = 0
-            _receivedCount.value = 0
             _lastTappedTime.value = null
             _lastReceivedTime.value = null
             _lastReceivedEvent.value = null
@@ -286,7 +267,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun buildWebSocketUrl(serverUrl: String, roomId: String): String? {
         val trimmedServerUrl = serverUrl.trim()
         val trimmedRoomId = roomId.trim()
-        if (trimmedServerUrl.isEmpty() || trimmedRoomId.isEmpty()) return null
+        if (trimmedServerUrl.isEmpty() || !isValidRoomId(trimmedRoomId)) return null
 
         return try {
             val parsedUri = Uri.parse(trimmedServerUrl)
@@ -310,6 +291,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun isValidRoomId(roomId: String): Boolean {
+        return roomId.isNotEmpty() &&
+            roomId.length <= MAX_ROOM_ID_LENGTH &&
+            roomId.none { it.code in 0..31 || it.code == 127 }
+    }
+
     private fun playSoundAndVibrate() {
         if (_soundEnabled.value) {
             soundManager.playMuyuHit()
@@ -320,7 +307,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        ProcessLifecycleOwner.get().lifecycle.removeObserver(processLifecycleObserver)
+        soundManager.release()
         super.onCleared()
     }
 }
