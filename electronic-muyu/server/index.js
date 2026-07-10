@@ -15,7 +15,12 @@ const MAX_PAYLOAD_BYTES = 4 * 1024;
 const MAX_ROOM_CONNECTIONS = 2;
 const MAX_TOTAL_CONNECTIONS = 100;
 const RATE_LIMIT_WINDOW_MS = 10_000;
-const MAX_MESSAGES_PER_WINDOW = 20;
+const MAX_MESSAGES_PER_WINDOW = parseIntegerInRange(
+    process.env.MAX_MESSAGES_PER_WINDOW,
+    60,
+    1,
+    1_000
+);
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const rooms = new Map();
@@ -25,7 +30,7 @@ function parseIntegerInRange(value, fallback, min, max) {
     if (value === undefined || value === '') return fallback;
     const parsed = Number(value);
     if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
-        throw new Error(`PORT 必须是 ${min}-${max} 范围内的整数`);
+        throw new Error(`配置值必须是 ${min}-${max} 范围内的整数`);
     }
     return parsed;
 }
@@ -178,12 +183,18 @@ wss.on('connection', (ws, req) => {
         + `networkHash=${networkHash} connections=${roomSize}`
     );
 
-    ws.send(JSON.stringify({
-        type: 'room_info',
-        room,
-        connections: roomSize,
-        timestamp: Date.now()
-    }));
+    try {
+        ws.send(JSON.stringify({
+            type: 'room_info',
+            room,
+            connections: roomSize,
+            timestamp: Date.now()
+        }));
+    } catch (err) {
+        console.error(`[relay] [${connId}] room_info 发送失败:`, safeLogValue(err.message));
+        ws.terminate();
+        return;
+    }
 
     let messageWindowStartedAt = Date.now();
     let messagesInWindow = 0;
