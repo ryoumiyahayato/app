@@ -62,6 +62,11 @@ class MuyuForegroundService : Service() {
             }
         }
         serviceScope.launch {
+            wsClient.lastError.collectLatest { error ->
+                MuyuConnectionRepository.setLastError(error)
+            }
+        }
+        serviceScope.launch {
             wsClient.lastDisconnectReason.collectLatest { reason ->
                 MuyuConnectionRepository.setDisconnectReason(
                     reason = reason,
@@ -140,6 +145,7 @@ class MuyuForegroundService : Service() {
                 WebSocketClient.DisconnectReason.INVALID_CONFIG,
                 System.currentTimeMillis()
             )
+            MuyuConnectionRepository.setLastError("连接配置无效")
             MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
             disconnectAndStop(WebSocketClient.DisconnectReason.INVALID_CONFIG)
             return
