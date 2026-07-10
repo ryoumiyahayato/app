@@ -9,22 +9,42 @@ const http = require('http');
 const WebSocket = require('ws');
 const crypto = require('crypto');
 
-const PORT = process.env.PORT || 8443;
+const PORT = parseIntegerInRange(process.env.PORT, 8443, 1, 65535);
 const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const MAX_PAYLOAD_BYTES = 4 * 1024;
 const MAX_ROOM_CONNECTIONS = 2;
+const MAX_TOTAL_CONNECTIONS = 100;
 const RATE_LIMIT_WINDOW_MS = 10_000;
 const MAX_MESSAGES_PER_WINDOW = 20;
+const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const rooms = new Map();
+let shuttingDown = false;
+
+function parseIntegerInRange(value, fallback, min, max) {
+    if (value === undefined || value === '') return fallback;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+        throw new Error(`PORT 必须是 ${min}-${max} 范围内的整数`);
+    }
+    return parsed;
+}
 
 function maskDeviceId(deviceId) {
     if (!deviceId || deviceId.length < 8) return '***';
     return deviceId.substring(0, 4) + '***' + deviceId.substring(deviceId.length - 4);
 }
 
-function roomLogId(room) {
-    return crypto.createHash('sha256').update(room).digest('hex').substring(0, 8);
+function shortHash(value) {
+    if (!value) return 'none';
+    return crypto.createHash('sha256').update(value).digest('hex').substring(0, 8);
+}
+
+function tokenMatches(actualToken) {
+    if (!RELAY_TOKEN) return true;
+    const expected = Buffer.from(RELAY_TOKEN);
+    const actual = Buffer.from(actualToken || '');
+    return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 function isValidRoom(room) {
@@ -37,27 +57,46 @@ function isValidRoom(room) {
 function isValidTap(message, room) {
     return message !== null
         && typeof message === 'object'
+        && !Array.isArray(message)
         && message.type === 'tap'
         && typeof message.pairId === 'string'
         && message.pairId === room
         && typeof message.deviceId === 'string'
         && message.deviceId.length > 0
         && message.deviceId.length <= 128
+        && !/[\u0000-\u001F\u007F]/.test(message.deviceId)
         && Number.isSafeInteger(message.timestamp)
         && message.timestamp > 0;
 }
 
 const httpServer = http.createServer((req, res) => {
-    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    } catch (_) {
+        res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('Bad Request\n');
+        return;
+    }
 
     if (parsedUrl.pathname === '/health' && req.method === 'GET') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store'
+        });
         res.end(JSON.stringify({ ok: true, service: 'electronic-muyu-relay' }));
         return;
     }
 
-    res.writeHead(426, { 'Content-Type': 'text/plain' });
-    res.end('This is a WebSocket server. Use ws:// to connect.\n');
+    res.writeHead(426, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('This is a WebSocket server. Use ws:// or wss:// to connect.\n');
+});
+
+httpServer.on('clientError', (err, socket) => {
+    console.error('[relay] HTTP client error:', err.message);
+    if (socket.writable) {
+        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+    }
 });
 
 const wss = new WebSocket.Server({
@@ -66,34 +105,61 @@ const wss = new WebSocket.Server({
 });
 
 wss.on('connection', (ws, req) => {
-    const parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-    const room = parsedUrl.searchParams.get('room');
-    const token = parsedUrl.searchParams.get('token') || '';
-    const clientIp = req.socket.remoteAddress;
-    const connId = crypto.randomUUID().substring(0, 8);
-
-    if (!isValidRoom(room)) {
-        console.log(`[relay] [${connId}] 拒绝连接: room 参数无效, ip=${clientIp}`);
+    let parsedUrl;
+    try {
+        parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    } catch (_) {
         ws.close(4000, 'valid room parameter required');
         return;
     }
 
-    const roomIdForLog = roomLogId(room);
+    const room = parsedUrl.searchParams.get('room');
+    const token = parsedUrl.searchParams.get('token') || '';
+    const networkHash = shortHash(req.socket.remoteAddress || 'unknown');
+    const connId = crypto.randomUUID().substring(0, 8);
 
-    if (RELAY_TOKEN && token !== RELAY_TOKEN) {
-        console.log(`[relay] [${connId}] 拒绝连接: token 无效, ip=${clientIp}, roomHash=${roomIdForLog}`);
+    if (shuttingDown) {
+        ws.close(1012, 'server restarting');
+        return;
+    }
+
+    if (wss.clients.size > MAX_TOTAL_CONNECTIONS) {
+        console.log(`[relay] [${connId}] 拒绝连接: 总连接数已满, networkHash=${networkHash}`);
+        ws.close(4003, 'relay is full');
+        return;
+    }
+
+    if (!isValidRoom(room)) {
+        console.log(`[relay] [${connId}] 拒绝连接: room 参数无效, networkHash=${networkHash}`);
+        ws.close(4000, 'valid room parameter required');
+        return;
+    }
+
+    const roomHash = shortHash(room);
+
+    if (!tokenMatches(token)) {
+        console.log(
+            `[relay] [${connId}] 拒绝连接: token 无效, `
+            + `networkHash=${networkHash}, roomHash=${roomHash}`
+        );
         ws.close(4001, 'invalid token');
         return;
     }
 
     const existingClients = rooms.get(room);
     if (existingClients && existingClients.size >= MAX_ROOM_CONNECTIONS) {
-        console.log(`[relay] [${connId}] 拒绝连接: room 已满, ip=${clientIp}, roomHash=${roomIdForLog}`);
+        console.log(
+            `[relay] [${connId}] 拒绝连接: room 已满, `
+            + `networkHash=${networkHash}, roomHash=${roomHash}`
+        );
         ws.close(4002, 'room is full');
         return;
     }
 
-    console.log(`[relay] [${connId}] 新连接 → roomHash=${roomIdForLog} ip=${clientIp}`);
+    ws.isAlive = true;
+    ws.on('pong', () => {
+        ws.isAlive = true;
+    });
 
     if (!rooms.has(room)) {
         rooms.set(room, new Set());
@@ -101,7 +167,10 @@ wss.on('connection', (ws, req) => {
     rooms.get(room).add(ws);
 
     const roomSize = rooms.get(room).size;
-    console.log(`[relay] [${connId}] roomHash=${roomIdForLog} 当前连接数: ${roomSize}`);
+    console.log(
+        `[relay] [${connId}] 新连接 roomHash=${roomHash} `
+        + `networkHash=${networkHash} connections=${roomSize}`
+    );
 
     ws.send(JSON.stringify({
         type: 'room_info',
@@ -113,7 +182,12 @@ wss.on('connection', (ws, req) => {
     let messageWindowStartedAt = Date.now();
     let messagesInWindow = 0;
 
-    ws.on('message', (data) => {
+    ws.on('message', (data, isBinary) => {
+        if (isBinary) {
+            ws.close(1003, 'text messages only');
+            return;
+        }
+
         const now = Date.now();
         if (now - messageWindowStartedAt >= RATE_LIMIT_WINDOW_MS) {
             messageWindowStartedAt = now;
@@ -122,63 +196,71 @@ wss.on('connection', (ws, req) => {
 
         messagesInWindow++;
         if (messagesInWindow > MAX_MESSAGES_PER_WINDOW) {
-            console.log(`[relay] [${connId}] 断开连接: 消息频率超限, roomHash=${roomIdForLog}`);
+            console.log(`[relay] [${connId}] 消息频率超限 roomHash=${roomHash}`);
             ws.close(4008, 'rate limit exceeded');
             return;
         }
 
         try {
             const parsed = JSON.parse(data.toString());
-
             console.log(
                 `[relay] [${connId}] 收到消息 type=${parsed?.type || 'unknown'} `
                 + `deviceId=${maskDeviceId(parsed?.deviceId)}`
             );
 
             if (!isValidTap(parsed, room)) {
-                console.log(`[relay] [${connId}] 忽略无效 tap 消息, roomHash=${roomIdForLog}`);
+                console.log(`[relay] [${connId}] 忽略无效 tap roomHash=${roomHash}`);
                 return;
             }
 
             const clients = rooms.get(room);
             if (!clients || clients.size <= 1) {
-                console.log(`[relay] [${connId}] roomHash=${roomIdForLog} 没有其他在线设备，丢弃 tap`);
+                console.log(`[relay] [${connId}] 对方离线，丢弃 tap roomHash=${roomHash}`);
                 return;
             }
 
+            const payload = JSON.stringify(parsed);
             let forwarded = 0;
             clients.forEach((client) => {
                 if (client !== ws && client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify(parsed));
-                    forwarded++;
+                    try {
+                        client.send(payload);
+                        forwarded++;
+                    } catch (err) {
+                        console.error(`[relay] [${connId}] 转发失败:`, err.message);
+                    }
                 }
             });
 
-            console.log(`[relay] [${connId}] 转发 tap 给 ${forwarded} 个客户端, roomHash=${roomIdForLog}`);
+            console.log(
+                `[relay] [${connId}] 转发 tap 给 ${forwarded} 个客户端 `
+                + `roomHash=${roomHash}`
+            );
         } catch (err) {
             console.error(`[relay] [${connId}] 消息解析失败:`, err.message);
         }
     });
 
-    ws.on('close', (code, reason) => {
+    ws.on('close', (code, reasonBuffer) => {
+        const reason = reasonBuffer?.toString() || 'none';
         console.log(
-            `[relay] [${connId}] 断开连接 code=${code} reason=${reason || 'none'} `
-            + `roomHash=${roomIdForLog}`
+            `[relay] [${connId}] 断开 code=${code} reason=${reason} `
+            + `roomHash=${roomHash}`
         );
         const clients = rooms.get(room);
         if (clients) {
             clients.delete(ws);
             if (clients.size === 0) {
                 rooms.delete(room);
-                console.log(`[relay] roomHash=${roomIdForLog} 已无连接，清理`);
+                console.log(`[relay] roomHash=${roomHash} 已无连接，清理`);
             } else {
-                console.log(`[relay] roomHash=${roomIdForLog} 剩余连接数: ${clients.size}`);
+                console.log(`[relay] roomHash=${roomHash} 剩余连接数: ${clients.size}`);
             }
         }
     });
 
     ws.on('error', (err) => {
-        console.error(`[relay] [${connId}] 错误:`, err.message);
+        console.error(`[relay] [${connId}] WebSocket 错误:`, err.message);
     });
 });
 
@@ -186,36 +268,62 @@ wss.on('error', (err) => {
     console.error('[relay] 服务器错误:', err.message);
 });
 
+const heartbeatTimer = setInterval(() => {
+    wss.clients.forEach((client) => {
+        if (client.isAlive === false) {
+            client.terminate();
+            return;
+        }
+        client.isAlive = false;
+        client.ping();
+    });
+}, HEARTBEAT_INTERVAL_MS);
+heartbeatTimer.unref();
+
 httpServer.listen(PORT, () => {
     console.log(`[relay] 电子木鱼中继已启动 → ws://0.0.0.0:${PORT}`);
     console.log(`[relay] 健康检查 → http://localhost:${PORT}/health`);
     console.log(
         `[relay] 限制: maxPayload=${MAX_PAYLOAD_BYTES} bytes, `
         + `maxRoomConnections=${MAX_ROOM_CONNECTIONS}, `
+        + `maxTotalConnections=${MAX_TOTAL_CONNECTIONS}, `
         + `maxMessages=${MAX_MESSAGES_PER_WINDOW}/${RATE_LIMIT_WINDOW_MS}ms`
     );
-    if (RELAY_TOKEN) {
-        console.log('[relay] RELAY_TOKEN 已设置，客户端需传递 token 参数');
-    } else {
-        console.log('[relay] RELAY_TOKEN 未设置（仅限私用测试）');
-    }
-    console.log(`[relay] 连接示例: ws://<host>:${PORT}?room=<roomId>`);
+    console.log(
+        RELAY_TOKEN
+            ? '[relay] RELAY_TOKEN 已设置，客户端需传递 token 参数'
+            : '[relay] RELAY_TOKEN 未设置（仅限私用测试）'
+    );
 });
 
-process.on('SIGINT', () => {
-    console.log('\n[relay] 收到 SIGINT，关闭服务...');
-    wss.close();
-    httpServer.close(() => {
-        console.log('[relay] 服务已关闭');
-        process.exit(0);
-    });
-});
+function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    clearInterval(heartbeatTimer);
+    console.log(`\n[relay] 收到 ${signal}，关闭服务...`);
 
-process.on('SIGTERM', () => {
-    console.log('\n[relay] 收到 SIGTERM，关闭服务...');
-    wss.close();
-    httpServer.close(() => {
-        console.log('[relay] 服务已关闭');
-        process.exit(0);
+    wss.clients.forEach((client) => {
+        try {
+            client.close(1001, 'server shutdown');
+        } catch (_) {
+            client.terminate();
+        }
     });
-});
+
+    const forceTimer = setTimeout(() => {
+        wss.clients.forEach((client) => client.terminate());
+        httpServer.close(() => process.exit(0));
+    }, 2_000);
+    forceTimer.unref();
+
+    wss.close(() => {
+        clearTimeout(forceTimer);
+        httpServer.close(() => {
+            console.log('[relay] 服务已关闭');
+            process.exit(0);
+        });
+    });
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
