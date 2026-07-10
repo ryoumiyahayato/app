@@ -188,8 +188,7 @@ class WebSocketClient(
             }
 
             override fun onClosed(socket: WebSocket, code: Int, reason: String) {
-                if (!isCurrentConnection(generation, socket)) return
-                webSocket = null
+                if (!retireCurrentConnection(generation, socket)) return
 
                 val closeReason = disconnectReasonForCloseCode(code)
                 val closeMessage = userMessageForCloseCode(code)
@@ -200,26 +199,27 @@ class WebSocketClient(
                 recordDisconnect(closeReason)
                 Log.d(TAG, "closed code=$code disconnectReason=${closeReason.label}")
                 _connectionState.value = ConnectionState.DISCONNECTED
-
-                if (shouldReconnect(closeReason)) {
-                    scheduleReconnect()
-                } else {
-                    _isReconnecting.value = false
-                    _lastReconnectResult.value = "stopped: ${closeReason.label}"
-                }
+                finishOrReconnect(closeReason)
             }
 
             override fun onFailure(socket: WebSocket, throwable: Throwable, response: Response?) {
-                if (!isCurrentConnection(generation, socket)) return
-                webSocket = null
+                if (!retireCurrentConnection(generation, socket)) return
 
-                val message = sanitizeErrorMessage(throwable.message)
+                val closeReason = disconnectReasonForHttpStatus(response?.code)
+                val message = when (closeReason) {
+                    DisconnectReason.SERVER_REJECTED ->
+                        "服务器拒绝 WebSocket 握手${response?.code?.let { "（HTTP $it）" }.orEmpty()}"
+                    DisconnectReason.RATE_LIMITED ->
+                        "服务器限制连接频率，请稍后重试"
+                    else -> sanitizeErrorMessage(throwable.message)
+                }
+
                 Log.e(TAG, "failure: $message")
                 _lastError.value = message
                 _connectionState.value = ConnectionState.DISCONNECTED
-                recordDisconnect(DisconnectReason.NETWORK_ERROR)
+                recordDisconnect(closeReason)
                 _lastReconnectResult.value = "failed: $message"
-                scheduleReconnect()
+                finishOrReconnect(closeReason)
             }
         }
 
@@ -270,7 +270,9 @@ class WebSocketClient(
         _connectionState.value = ConnectionState.DISCONNECTED
 
         Log.d(TAG, "disconnect requested: reason=${reason.label}")
-        socket?.close(1000, reason.label)
+        if (socket?.close(1000, reason.label) == false) {
+            socket.cancel()
+        }
     }
 
     fun shutdown(reason: DisconnectReason) {
@@ -282,6 +284,22 @@ class WebSocketClient(
 
     private fun isCurrentConnection(generation: Long, socket: WebSocket): Boolean {
         return generation == connectionGeneration && (webSocket == null || webSocket === socket)
+    }
+
+    private fun retireCurrentConnection(generation: Long, socket: WebSocket): Boolean {
+        if (!isCurrentConnection(generation, socket)) return false
+        webSocket = null
+        connectionGeneration++
+        return true
+    }
+
+    private fun finishOrReconnect(reason: DisconnectReason) {
+        if (shouldReconnect(reason)) {
+            scheduleReconnect()
+        } else {
+            _isReconnecting.value = false
+            _lastReconnectResult.value = "stopped: ${reason.label}"
+        }
     }
 
     private fun scheduleReconnect() {
@@ -310,9 +328,17 @@ class WebSocketClient(
 
     private fun disconnectReasonForCloseCode(code: Int): DisconnectReason {
         return when (code) {
-            4000, 4001, 4002, 1009 -> DisconnectReason.SERVER_REJECTED
+            4000, 4001, 4002, 4003, 1003, 1009 -> DisconnectReason.SERVER_REJECTED
             4008 -> DisconnectReason.RATE_LIMITED
             else -> DisconnectReason.SERVER_CLOSED
+        }
+    }
+
+    private fun disconnectReasonForHttpStatus(statusCode: Int?): DisconnectReason {
+        return when (statusCode) {
+            429 -> DisconnectReason.RATE_LIMITED
+            in 400..499 -> DisconnectReason.SERVER_REJECTED
+            else -> DisconnectReason.NETWORK_ERROR
         }
     }
 
@@ -321,7 +347,9 @@ class WebSocketClient(
             4000 -> "服务器拒绝连接：房间参数无效"
             4001 -> "服务器拒绝连接：鉴权失败"
             4002 -> "服务器拒绝连接：房间已满"
+            4003 -> "服务器当前连接数已满"
             4008 -> "发送频率过高，请稍后重新连接"
+            1003 -> "服务器仅接受文本消息"
             1009 -> "消息超过服务器允许的大小"
             else -> null
         }
