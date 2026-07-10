@@ -44,7 +44,6 @@ class LocalDataStore(private val context: Context) {
         prefs[KEY_NOTIFICATION_ENABLED] ?: false
     }
 
-
     val deviceId: Flow<String> = context.dataStore.data.map { prefs ->
         prefs[KEY_DEVICE_ID] ?: ""
     }
@@ -57,15 +56,35 @@ class LocalDataStore(private val context: Context) {
         prefs[KEY_ROOM_ID] ?: ""
     }
 
+    suspend fun incrementMeriCount(): Int {
+        var updatedCount = 0
+        context.dataStore.edit { prefs ->
+            val current = prefs[KEY_MERI_COUNT] ?: 0
+            updatedCount = incrementWithoutOverflow(current)
+            prefs[KEY_MERI_COUNT] = updatedCount
+        }
+        return updatedCount
+    }
+
+    suspend fun incrementReceivedCount(): Int {
+        var updatedCount = 0
+        context.dataStore.edit { prefs ->
+            val current = prefs[KEY_RECEIVED_COUNT] ?: 0
+            updatedCount = incrementWithoutOverflow(current)
+            prefs[KEY_RECEIVED_COUNT] = updatedCount
+        }
+        return updatedCount
+    }
+
     suspend fun setMeriCount(count: Int) {
         context.dataStore.edit { prefs ->
-            prefs[KEY_MERI_COUNT] = count
+            prefs[KEY_MERI_COUNT] = count.coerceAtLeast(0)
         }
     }
 
     suspend fun setReceivedCount(count: Int) {
         context.dataStore.edit { prefs ->
-            prefs[KEY_RECEIVED_COUNT] = count
+            prefs[KEY_RECEIVED_COUNT] = count.coerceAtLeast(0)
         }
     }
 
@@ -86,7 +105,6 @@ class LocalDataStore(private val context: Context) {
             prefs[KEY_NOTIFICATION_ENABLED] = enabled
         }
     }
-
 
     suspend fun setDeviceId(id: String) {
         context.dataStore.edit { prefs ->
@@ -111,5 +129,9 @@ class LocalDataStore(private val context: Context) {
             prefs[KEY_MERI_COUNT] = 0
             prefs[KEY_RECEIVED_COUNT] = 0
         }
+    }
+
+    private fun incrementWithoutOverflow(value: Int): Int {
+        return if (value >= Int.MAX_VALUE) Int.MAX_VALUE else value + 1
     }
 }
