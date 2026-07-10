@@ -34,6 +34,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -44,8 +45,12 @@ import app.electronicmuyu.android.model.ConnectionState
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.launch
 
 private const val MAX_ROOM_ID_LENGTH = 64
+private const val MAX_SERVER_URL_LENGTH = 2048
+private const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
+private const val DEFAULT_ROOM_ID = "test-room"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -74,8 +79,8 @@ fun SettingsScreen(
     onSendTestNotification: () -> Unit = {},
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onSaveConfig: (serverUrl: String, roomId: String) -> Boolean,
-    onResetDefaults: () -> Unit,
+    onSaveConfig: suspend (serverUrl: String, roomId: String) -> Boolean,
+    onResetDefaults: suspend () -> Boolean,
     onClearCounts: () -> Unit,
     onNavigateBack: () -> Unit
 ) {
@@ -112,138 +117,23 @@ fun SettingsScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = "反馈",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "声音",
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        Switch(
-                            checked = soundEnabled,
-                            onCheckedChange = onSoundToggle
-                        )
-                    }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "震动",
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        Switch(
-                            checked = vibrationEnabled,
-                            onCheckedChange = onVibrationToggle
-                        )
-                    }
-                }
-            }
+            FeedbackCard(
+                soundEnabled = soundEnabled,
+                vibrationEnabled = vibrationEnabled,
+                onSoundToggle = onSoundToggle,
+                onVibrationToggle = onVibrationToggle
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = "通知",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "通知提醒",
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        Switch(
-                            checked = notificationEnabled,
-                            onCheckedChange = onNotificationToggle
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = if (notificationPermissionGranted) {
-                            "通知权限：已授权"
-                        } else {
-                            "通知权限：未授权"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (notificationPermissionGranted) {
-                            Color(0xFF4CAF50)
-                        } else {
-                            Color(0xFFF44336)
-                        }
-                    )
-                    Text(
-                        text = "实际状态：$notificationDeliveryStatus",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (notificationDeliveryStatus == "通知可用") {
-                            Color(0xFF4CAF50)
-                        } else {
-                            Color(0xFFF44336)
-                        }
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedButton(
-                        onClick = onOpenNotificationSettings,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("打开系统通知设置")
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(
-                        onClick = onSendTestNotification,
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("发送测试通知")
-                    }
-                }
-            }
+            NotificationCard(
+                notificationEnabled = notificationEnabled,
+                notificationPermissionGranted = notificationPermissionGranted,
+                notificationDeliveryStatus = notificationDeliveryStatus,
+                onNotificationToggle = onNotificationToggle,
+                onOpenNotificationSettings = onOpenNotificationSettings,
+                onSendTestNotification = onSendTestNotification
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -257,171 +147,143 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = "连接",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "连接状态",
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                        Text(
-                            text = connectionDisplayName(connectionState),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = connectionDisplayColor(connectionState)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    if (wsEnabled) {
-                        Button(
-                            onClick = onDisconnect,
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error
-                            ),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text("断开连接")
-                        }
-                    } else {
-                        Button(
-                            onClick = onConnect,
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text("连接服务")
-                        }
-                    }
-
-                    if (isReconnecting) {
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "断线自动重连中…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                        )
-                    }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-
-                    Text(
-                        text = "连接诊断",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    DiagnosticRow("WebSocket 状态", connectionDebugStateName(connectionState))
-                    DiagnosticRow("最近断开原因", lastDisconnectReason)
-                    DiagnosticRow("最近断开时间", formatDisconnectTime(lastDisconnectAtMillis))
-                    DiagnosticRow("App 前后台", if (isAppInForeground) "foreground" else "background")
-                    DiagnosticRow("正在自动重连", isReconnecting.toString())
-                    DiagnosticRow("最近重连结果", lastReconnectResult)
-                    DiagnosticRow("Foreground Service", if (isServiceRunning) "running" else "stopped")
-                    DiagnosticRow("常驻通知状态", foregroundNotificationText)
-                }
-            }
+            ConnectionCard(
+                connectionState = connectionState,
+                wsEnabled = wsEnabled,
+                lastDisconnectReason = lastDisconnectReason,
+                lastDisconnectAtMillis = lastDisconnectAtMillis,
+                isAppInForeground = isAppInForeground,
+                isReconnecting = isReconnecting,
+                lastReconnectResult = lastReconnectResult,
+                isServiceRunning = isServiceRunning,
+                foregroundNotificationText = foregroundNotificationText,
+                onConnect = onConnect,
+                onDisconnect = onDisconnect
+            )
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = "操作",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Button(
-                        onClick = onClearCounts,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error
-                        ),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("清空本机计数（功德 + 收到提醒）")
-                    }
-                }
-            }
+            ActionsCard(onClearCounts = onClearCounts)
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant
-                )
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(16.dp)
-                ) {
-                    Text(
-                        text = "关于",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "电子木鱼",
-                        style = MaterialTheme.typography.bodyLarge
-                    )
-                    Text(
-                        text = "版本 0.6.0 — 连接配置 MVP",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "双人极简提醒器",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "点一下木鱼，功德 +1，音效 + 震动",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
+            AboutCard()
 
             Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+private fun FeedbackCard(
+    soundEnabled: Boolean,
+    vibrationEnabled: Boolean,
+    onSoundToggle: (Boolean) -> Unit,
+    onVibrationToggle: (Boolean) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            SectionTitle("反馈")
+            Spacer(modifier = Modifier.height(8.dp))
+
+            SettingSwitchRow(
+                label = "声音",
+                checked = soundEnabled,
+                onCheckedChange = onSoundToggle
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            SettingSwitchRow(
+                label = "震动",
+                checked = vibrationEnabled,
+                onCheckedChange = onVibrationToggle
+            )
+        }
+    }
+}
+
+@Composable
+private fun NotificationCard(
+    notificationEnabled: Boolean,
+    notificationPermissionGranted: Boolean,
+    notificationDeliveryStatus: String,
+    onNotificationToggle: (Boolean) -> Unit,
+    onOpenNotificationSettings: () -> Unit,
+    onSendTestNotification: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            SectionTitle("通知")
+            Spacer(modifier = Modifier.height(8.dp))
+
+            SettingSwitchRow(
+                label = "通知提醒",
+                checked = notificationEnabled,
+                onCheckedChange = onNotificationToggle
+            )
+
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = if (notificationPermissionGranted) {
+                    "通知权限：已授权"
+                } else {
+                    "通知权限：未授权"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = if (notificationPermissionGranted) {
+                    Color(0xFF4CAF50)
+                } else {
+                    Color(0xFFF44336)
+                }
+            )
+            Text(
+                text = "实际状态：$notificationDeliveryStatus",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (notificationDeliveryStatus == "通知可用") {
+                    Color(0xFF4CAF50)
+                } else {
+                    Color(0xFFF44336)
+                }
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = onOpenNotificationSettings,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("打开系统通知设置")
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = onSendTestNotification,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("发送测试通知")
+            }
         }
     }
 }
@@ -431,14 +293,16 @@ private fun ConnectionConfigCard(
     serverUrl: String,
     roomId: String,
     deviceIdDisplay: String,
-    onSaveConfig: (serverUrl: String, roomId: String) -> Boolean,
-    onResetDefaults: () -> Unit
+    onSaveConfig: suspend (serverUrl: String, roomId: String) -> Boolean,
+    onResetDefaults: suspend () -> Boolean
 ) {
+    val coroutineScope = rememberCoroutineScope()
     var localServerUrl by remember(serverUrl) { mutableStateOf(serverUrl) }
     var localRoomId by remember(roomId) { mutableStateOf(roomId) }
     var serverUrlError by remember { mutableStateOf<String?>(null) }
     var roomIdError by remember { mutableStateOf<String?>(null) }
     var savedMessage by remember { mutableStateOf<String?>(null) }
+    var isSaving by remember { mutableStateOf(false) }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -452,11 +316,7 @@ private fun ConnectionConfigCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            Text(
-                text = "连接配置",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
-            )
+            SectionTitle("连接配置")
             Spacer(modifier = Modifier.height(12.dp))
 
             OutlinedTextField(
@@ -466,11 +326,12 @@ private fun ConnectionConfigCard(
                     serverUrlError = null
                     savedMessage = null
                 },
+                enabled = !isSaving,
                 label = { Text("服务器地址") },
-                placeholder = { Text("ws://192.168.96.33:8443") },
+                placeholder = { Text(DEFAULT_SERVER_URL) },
                 singleLine = true,
                 isError = serverUrlError != null,
-                supportingText = serverUrlError?.let { { Text(it) } },
+                supportingText = serverUrlError?.let { error -> { Text(error) } },
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -483,11 +344,12 @@ private fun ConnectionConfigCard(
                     roomIdError = null
                     savedMessage = null
                 },
+                enabled = !isSaving,
                 label = { Text("房间 ID") },
-                placeholder = { Text("test-room") },
+                placeholder = { Text(DEFAULT_ROOM_ID) },
                 singleLine = true,
                 isError = roomIdError != null,
-                supportingText = roomIdError?.let { { Text(it) } },
+                supportingText = roomIdError?.let { error -> { Text(error) } },
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -507,28 +369,36 @@ private fun ConnectionConfigCard(
                     val normalizedRoomId = localRoomId.trim()
                     serverUrlError = validateServerUrl(normalizedServerUrl)
                     roomIdError = validateRoomId(normalizedRoomId)
+                    savedMessage = null
 
                     if (serverUrlError == null && roomIdError == null) {
-                        if (onSaveConfig(normalizedServerUrl, normalizedRoomId)) {
-                            localServerUrl = normalizedServerUrl
-                            localRoomId = normalizedRoomId
-                            savedMessage = "配置已保存"
-                        } else {
-                            serverUrlError = "配置未保存，请检查服务器地址"
-                            savedMessage = null
+                        coroutineScope.launch {
+                            isSaving = true
+                            try {
+                                if (onSaveConfig(normalizedServerUrl, normalizedRoomId)) {
+                                    localServerUrl = normalizedServerUrl
+                                    localRoomId = normalizedRoomId
+                                    savedMessage = "配置已保存"
+                                } else {
+                                    serverUrlError = "配置保存失败，请检查地址或稍后重试"
+                                }
+                            } finally {
+                                isSaving = false
+                            }
                         }
                     }
                 },
+                enabled = !isSaving,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Text("保存配置")
+                Text(if (isSaving) "正在保存…" else "保存配置")
             }
 
-            if (savedMessage != null) {
+            savedMessage?.let { message ->
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = savedMessage!!,
+                    text = message,
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF4CAF50)
                 )
@@ -551,13 +421,25 @@ private fun ConnectionConfigCard(
 
             OutlinedButton(
                 onClick = {
-                    localServerUrl = "ws://192.168.96.33:8443"
-                    localRoomId = "test-room"
-                    serverUrlError = null
-                    roomIdError = null
-                    savedMessage = null
-                    onResetDefaults()
+                    coroutineScope.launch {
+                        isSaving = true
+                        savedMessage = null
+                        try {
+                            if (onResetDefaults()) {
+                                localServerUrl = DEFAULT_SERVER_URL
+                                localRoomId = DEFAULT_ROOM_ID
+                                serverUrlError = null
+                                roomIdError = null
+                                savedMessage = "已恢复默认配置"
+                            } else {
+                                serverUrlError = "恢复默认配置失败，请稍后重试"
+                            }
+                        } finally {
+                            isSaving = false
+                        }
+                    }
                 },
+                enabled = !isSaving,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(8.dp)
             ) {
@@ -567,14 +449,207 @@ private fun ConnectionConfigCard(
     }
 }
 
+@Composable
+private fun ConnectionCard(
+    connectionState: ConnectionState,
+    wsEnabled: Boolean,
+    lastDisconnectReason: String,
+    lastDisconnectAtMillis: Long?,
+    isAppInForeground: Boolean,
+    isReconnecting: Boolean,
+    lastReconnectResult: String,
+    isServiceRunning: Boolean,
+    foregroundNotificationText: String,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            SectionTitle("连接")
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("连接状态", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    text = connectionDisplayName(connectionState),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = connectionDisplayColor(connectionState)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            if (wsEnabled) {
+                Button(
+                    onClick = onDisconnect,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("断开连接")
+                }
+            } else {
+                Button(
+                    onClick = onConnect,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text("连接服务")
+                }
+            }
+
+            if (isReconnecting) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "断线自动重连中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+            Text(
+                text = "连接诊断",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            DiagnosticRow("WebSocket 状态", connectionDebugStateName(connectionState))
+            DiagnosticRow("最近断开原因", lastDisconnectReason)
+            DiagnosticRow("最近断开时间", formatDisconnectTime(lastDisconnectAtMillis))
+            DiagnosticRow("App 前后台", if (isAppInForeground) "foreground" else "background")
+            DiagnosticRow("正在自动重连", isReconnecting.toString())
+            DiagnosticRow("最近重连结果", lastReconnectResult)
+            DiagnosticRow("Foreground Service", if (isServiceRunning) "running" else "stopped")
+            DiagnosticRow("常驻通知状态", foregroundNotificationText)
+        }
+    }
+}
+
+@Composable
+private fun ActionsCard(onClearCounts: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            SectionTitle("操作")
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = onClearCounts,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                ),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("清空本机计数（功德 + 收到提醒）")
+            }
+        }
+    }
+}
+
+@Composable
+private fun AboutCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            SectionTitle("关于")
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("电子木鱼", style = MaterialTheme.typography.bodyLarge)
+            Text(
+                text = "版本 0.6.0 — 连接配置 MVP",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "双人极简提醒器",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "点一下木鱼，功德 +1，音效 + 震动",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingSwitchRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyLarge)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.Bold
+    )
+}
+
 private fun validateServerUrl(serverUrl: String): String? {
     if (serverUrl.isBlank()) return "服务器地址不能为空"
+    if (serverUrl.length > MAX_SERVER_URL_LENGTH) {
+        return "服务器地址不能超过 $MAX_SERVER_URL_LENGTH 个字符"
+    }
+
     return try {
         val uri = Uri.parse(serverUrl)
         val scheme = uri.scheme?.lowercase()
         when {
             scheme != "ws" && scheme != "wss" -> "必须以 ws:// 或 wss:// 开头"
             uri.host.isNullOrBlank() -> "服务器地址必须包含主机名或 IP"
+            !uri.encodedUserInfo.isNullOrEmpty() -> "服务器地址不能包含用户名或密码"
+            uri.fragment != null -> "服务器地址不能包含 #fragment"
+            uri.port == 0 || uri.port > 65535 -> "服务器端口必须为 1-65535"
             else -> null
         }
     } catch (_: Exception) {
