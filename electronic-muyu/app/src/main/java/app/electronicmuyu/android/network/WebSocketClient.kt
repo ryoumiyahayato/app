@@ -21,8 +21,8 @@ import java.util.concurrent.TimeUnit
 /**
  * 电子木鱼 WebSocket 客户端。
  *
- * 每个 MuyuForegroundService 实例只创建一个客户端。客户端内部通过 connectionGeneration
- * 隔离旧连接回调，避免配置切换或重连时旧 socket 再次修改当前状态。
+ * 每个 MuyuForegroundService 实例只创建一个客户端。连接操作、回调和重连任务都串行化到
+ * Service 提供的主协程作用域，并通过 connectionGeneration 隔离旧 socket 回调。
  */
 class WebSocketClient(
     private val scope: CoroutineScope
@@ -155,71 +155,78 @@ class WebSocketClient(
 
         val listener = object : WebSocketListener() {
             override fun onOpen(socket: WebSocket, response: Response) {
-                if (!isCurrentConnection(generation, socket)) return
-                webSocket = socket
-                Log.d(TAG, "connected roomHash=${shortHash(this@WebSocketClient.pairId)}")
-                _lastError.value = ""
-                _connectionState.value = ConnectionState.CONNECTED
-                _isReconnecting.value = false
-                _lastReconnectResult.value = if (retryAttempt > 0) "success" else "not_needed"
-                reconnectJob = null
-                retryAttempt = 0
+                scope.launch {
+                    if (!isCurrentConnection(generation, socket)) return@launch
+                    webSocket = socket
+                    Log.d(TAG, "connected roomHash=${shortHash(this@WebSocketClient.pairId)}")
+                    _lastError.value = ""
+                    _connectionState.value = ConnectionState.CONNECTED
+                    _isReconnecting.value = false
+                    _lastReconnectResult.value = if (retryAttempt > 0) "success" else "not_needed"
+                    reconnectJob = null
+                    retryAttempt = 0
+                }
             }
 
             override fun onMessage(socket: WebSocket, text: String) {
-                if (!isCurrentConnection(generation, socket)) return
-                val event = TapEvent.fromJson(text)
-                if (
-                    event != null &&
-                    event.pairId == this@WebSocketClient.pairId &&
-                    event.deviceId != this@WebSocketClient.deviceId
-                ) {
-                    Log.d(TAG, "received tap from deviceId=${maskDeviceId(event.deviceId)}")
-                    onTapReceived?.invoke(event)
-                } else {
-                    Log.d(TAG, "received invalid, mismatched, or self tap; ignoring")
+                scope.launch {
+                    if (!isCurrentConnection(generation, socket)) return@launch
+                    val event = TapEvent.fromJson(text)
+                    if (
+                        event != null &&
+                        event.pairId == this@WebSocketClient.pairId &&
+                        event.deviceId != this@WebSocketClient.deviceId
+                    ) {
+                        Log.d(TAG, "received tap from deviceId=${maskDeviceId(event.deviceId)}")
+                        onTapReceived?.invoke(event)
+                    } else {
+                        Log.d(TAG, "received invalid, mismatched, or self tap; ignoring")
+                    }
                 }
             }
 
             override fun onClosing(socket: WebSocket, code: Int, reason: String) {
-                if (!isCurrentConnection(generation, socket)) return
-                Log.d(TAG, "closing code=$code")
-                socket.close(1000, null)
+                scope.launch {
+                    if (!isCurrentConnection(generation, socket)) return@launch
+                    Log.d(TAG, "closing code=$code")
+                    socket.close(1000, null)
+                }
             }
 
             override fun onClosed(socket: WebSocket, code: Int, reason: String) {
-                if (!retireCurrentConnection(generation, socket)) return
+                scope.launch {
+                    if (!retireCurrentConnection(generation, socket)) return@launch
 
-                val closeReason = disconnectReasonForCloseCode(code)
-                val closeMessage = userMessageForCloseCode(code)
-                if (closeMessage != null) {
-                    _lastError.value = closeMessage
+                    val closeReason = disconnectReasonForCloseCode(code)
+                    userMessageForCloseCode(code)?.let { _lastError.value = it }
+
+                    recordDisconnect(closeReason)
+                    Log.d(TAG, "closed code=$code disconnectReason=${closeReason.label}")
+                    _connectionState.value = ConnectionState.DISCONNECTED
+                    finishOrReconnect(closeReason)
                 }
-
-                recordDisconnect(closeReason)
-                Log.d(TAG, "closed code=$code disconnectReason=${closeReason.label}")
-                _connectionState.value = ConnectionState.DISCONNECTED
-                finishOrReconnect(closeReason)
             }
 
             override fun onFailure(socket: WebSocket, throwable: Throwable, response: Response?) {
-                if (!retireCurrentConnection(generation, socket)) return
+                scope.launch {
+                    if (!retireCurrentConnection(generation, socket)) return@launch
 
-                val closeReason = disconnectReasonForHttpStatus(response?.code)
-                val message = when (closeReason) {
-                    DisconnectReason.SERVER_REJECTED ->
-                        "服务器拒绝 WebSocket 握手${response?.code?.let { "（HTTP $it）" }.orEmpty()}"
-                    DisconnectReason.RATE_LIMITED ->
-                        "服务器限制连接频率，请稍后重试"
-                    else -> sanitizeErrorMessage(throwable.message)
+                    val closeReason = disconnectReasonForHttpStatus(response?.code)
+                    val message = when (closeReason) {
+                        DisconnectReason.SERVER_REJECTED ->
+                            "服务器拒绝 WebSocket 握手${response?.code?.let { "（HTTP $it）" }.orEmpty()}"
+                        DisconnectReason.RATE_LIMITED ->
+                            "服务器限制连接频率，请稍后重试"
+                        else -> sanitizeErrorMessage(throwable.message)
+                    }
+
+                    Log.e(TAG, "failure: $message")
+                    _lastError.value = message
+                    _connectionState.value = ConnectionState.DISCONNECTED
+                    recordDisconnect(closeReason)
+                    _lastReconnectResult.value = "failed: $message"
+                    finishOrReconnect(closeReason)
                 }
-
-                Log.e(TAG, "failure: $message")
-                _lastError.value = message
-                _connectionState.value = ConnectionState.DISCONNECTED
-                recordDisconnect(closeReason)
-                _lastReconnectResult.value = "failed: $message"
-                finishOrReconnect(closeReason)
             }
         }
 
@@ -270,8 +277,10 @@ class WebSocketClient(
         _connectionState.value = ConnectionState.DISCONNECTED
 
         Log.d(TAG, "disconnect requested: reason=${reason.label}")
-        if (socket?.close(1000, reason.label) == false) {
-            socket.cancel()
+        socket?.let {
+            if (!it.close(1000, reason.label)) {
+                it.cancel()
+            }
         }
     }
 
@@ -317,6 +326,7 @@ class WebSocketClient(
             _lastReconnectResult.value = "scheduled attempt $retryAttempt in ${delayMs}ms"
             Log.d(TAG, "scheduling reconnect attempt $retryAttempt in ${delayMs}ms")
             delay(delayMs)
+            reconnectJob = null
             connect(url, reconnectDeviceId, reconnectPairId, force = true)
         }
     }
