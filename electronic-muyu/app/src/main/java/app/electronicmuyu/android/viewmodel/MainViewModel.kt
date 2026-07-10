@@ -2,6 +2,7 @@ package app.electronicmuyu.android.viewmodel
 
 import android.app.Application
 import android.content.Intent
+import android.net.Uri
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -42,9 +43,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val notificationEnabled: StateFlow<Boolean> = _notificationEnabled.asStateFlow()
 
     val connectionState: StateFlow<ConnectionState> = MuyuConnectionRepository.connectionState
-
-    private val _lastError = MutableStateFlow("")
-    val lastError: StateFlow<String> = _lastError.asStateFlow()
+    val lastError: StateFlow<String> = MuyuConnectionRepository.lastError
 
     private val _deviceId = MutableStateFlow("")
     val deviceId: StateFlow<String> = _deviceId.asStateFlow()
@@ -164,35 +163,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             MuyuConnectionRepository.isServiceRunning.collect { isRunning ->
-                if (!isRunning) {
-                    _wsEnabled.value = false
-                }
+                _wsEnabled.value = isRunning
             }
         }
     }
 
     fun startConnection() {
         val deviceIdVal = _deviceId.value
-        if (deviceIdVal.isEmpty()) {
+        val serverUrlVal = _serverUrl.value
+        val roomIdVal = _roomId.value
+        val fullUrl = buildWebSocketUrl(serverUrlVal, roomIdVal)
+
+        if (deviceIdVal.isBlank() || fullUrl == null) {
+            _wsEnabled.value = false
+            MuyuConnectionRepository.setLastError("连接配置无效，请检查服务器地址和房间 ID")
             MuyuConnectionRepository.setDisconnectReason(
                 WebSocketClient.DisconnectReason.INVALID_CONFIG,
                 System.currentTimeMillis()
             )
+            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
             return
         }
 
-        val serverUrlVal = _serverUrl.value
-        val roomIdVal = _roomId.value
-        val fullUrl = "${serverUrlVal}?room=${roomIdVal}"
-
         _wsEnabled.value = true
+        MuyuConnectionRepository.setLastError("")
         MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
 
         val context = getApplication<Application>()
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_START_CONNECT
             putExtra(MuyuForegroundService.EXTRA_SERVER_URL, fullUrl)
-            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdVal)
+            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdVal.trim())
             putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdVal)
         }
         ContextCompat.startForegroundService(context, intent)
@@ -251,8 +252,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveConnectionConfig(serverUrl: String, roomId: String) {
         viewModelScope.launch {
-            localDataStore.setWsUrl(serverUrl)
-            localDataStore.setRoomId(roomId)
+            localDataStore.setWsUrl(serverUrl.trim())
+            localDataStore.setRoomId(roomId.trim())
         }
     }
 
@@ -280,6 +281,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun checkNotificationPermissionState(): Boolean {
         return NotificationHelper.hasNotificationPermission(getApplication())
+    }
+
+    private fun buildWebSocketUrl(serverUrl: String, roomId: String): String? {
+        val trimmedServerUrl = serverUrl.trim()
+        val trimmedRoomId = roomId.trim()
+        if (trimmedServerUrl.isEmpty() || trimmedRoomId.isEmpty()) return null
+
+        return try {
+            val parsedUri = Uri.parse(trimmedServerUrl)
+            val scheme = parsedUri.scheme?.lowercase()
+            if ((scheme != "ws" && scheme != "wss") || parsedUri.host.isNullOrBlank()) {
+                return null
+            }
+
+            val builder = parsedUri.buildUpon().clearQuery()
+            parsedUri.queryParameterNames
+                .filterNot { it == "room" }
+                .forEach { name ->
+                    parsedUri.getQueryParameters(name).forEach { value ->
+                        builder.appendQueryParameter(name, value)
+                    }
+                }
+            builder.appendQueryParameter("room", trimmedRoomId)
+            builder.build().toString()
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun playSoundAndVibrate() {
