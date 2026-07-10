@@ -42,6 +42,7 @@ GET http://localhost:8443/health
 |---|---|---|
 | `PORT` | `8443` | 1～65535 范围内的监听端口 |
 | `RELAY_TOKEN` | 空 | 可选共享 secret；设置后客户端必须提供相同 token |
+| `MAX_MESSAGES_PER_WINDOW` | `60` | 每个连接在 10 秒窗口内允许的消息数，范围 1～1000 |
 
 当前 Android 端尚未提供安全 token 输入，因此 6B 初次公网联调不得设置 `RELAY_TOKEN`。
 
@@ -108,7 +109,7 @@ wss://<域名>?room=约定房间名
 
 单条 WebSocket 消息最大 4 KB。
 
-单个连接每 10 秒最多发送 20 条消息；超限后以 `4008` 关闭。
+单个连接默认每 10 秒最多发送 60 条消息；可通过 `MAX_MESSAGES_PER_WINDOW` 调整，超限后以 `4008` 关闭。默认值允许正常快速连续敲击，同时仍限制异常脚本刷消息。
 
 合法 tap：
 
