@@ -19,21 +19,17 @@ import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 /**
- * 阶段 3 WSS 客户端
+ * 电子木鱼 WebSocket 客户端。
  *
- * 功能：
- * - 连接指定的 WebSocket URL
- * - 发送和接收 tap
- * - 断线自动重连（指数退避，上限 60s）
- *
- * 公网长期使用必须切换到 wss://。
+ * 每个 MuyuForegroundService 实例只创建一个客户端。客户端内部通过 connectionGeneration
+ * 隔离旧连接回调，避免配置切换或重连时旧 socket 再次修改当前状态。
  */
 class WebSocketClient(
     private val scope: CoroutineScope
 ) {
     companion object {
         private const val TAG = "ElectronicMuyu"
-        private const val INITIAL_RETRY_DELAY_MS = 1000L
+        private const val INITIAL_RETRY_DELAY_MS = 1_000L
         private const val MAX_RETRY_DELAY_MS = 60_000L
     }
 
@@ -83,10 +79,11 @@ class WebSocketClient(
 
     private var webSocket: WebSocket? = null
     private var reconnectJob: Job? = null
+    private var connectionGeneration = 0L
     private var currentUrl: String? = null
     private var deviceId: String = ""
     private var pairId: String = "test-room"
-    private var manualCloseReason: DisconnectReason? = null
+    private var retryAttempt = 0
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
@@ -110,25 +107,19 @@ class WebSocketClient(
 
     fun connect(url: String, deviceId: String, pairId: String = "test-room", force: Boolean = false) {
         val currentState = _connectionState.value
-        if (!force &&
-            (currentState == ConnectionState.CONNECTED || currentState == ConnectionState.CONNECTING || currentState == ConnectionState.RECONNECTING) &&
-            currentUrl == url &&
-            this.deviceId == deviceId &&
-            this.pairId == pairId
+        val sameConfig = currentUrl == url && this.deviceId == deviceId && this.pairId == pairId
+        if (!force && sameConfig && currentState in setOf(
+                ConnectionState.CONNECTED,
+                ConnectionState.CONNECTING,
+                ConnectionState.RECONNECTING
+            )
         ) {
             Log.d(TAG, "connect ignored: already active state=$currentState")
             return
         }
 
-        Log.d(
-            TAG,
-            "connecting to ${safeUrlForLog(url)} deviceId=${maskDeviceId(deviceId)} roomHash=${shortHash(pairId)}"
-        )
-
         val request = try {
-            Request.Builder()
-                .url(url)
-                .build()
+            Request.Builder().url(url).build()
         } catch (_: Exception) {
             val message = "invalid websocket URL"
             Log.e(TAG, message)
@@ -139,115 +130,167 @@ class WebSocketClient(
             return
         }
 
+        if (!force) {
+            reconnectJob?.cancel()
+            reconnectJob = null
+            retryAttempt = 0
+        }
+
+        val previousSocket = webSocket
+        val generation = ++connectionGeneration
+        webSocket = null
+        previousSocket?.cancel()
+
         this.currentUrl = url
         this.deviceId = deviceId
         this.pairId = pairId
-        this.manualCloseReason = null
 
         _lastError.value = ""
-        _connectionState.value = ConnectionState.CONNECTING
+        _connectionState.value = if (force) ConnectionState.RECONNECTING else ConnectionState.CONNECTING
 
-        webSocket = client.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "connected roomHash=${shortHash(pairId)}")
+        Log.d(
+            TAG,
+            "connecting to ${safeUrlForLog(url)} deviceId=${maskDeviceId(deviceId)} roomHash=${shortHash(pairId)}"
+        )
+
+        val listener = object : WebSocketListener() {
+            override fun onOpen(socket: WebSocket, response: Response) {
+                if (!isCurrentConnection(generation, socket)) return
+                webSocket = socket
+                Log.d(TAG, "connected roomHash=${shortHash(this@WebSocketClient.pairId)}")
                 _lastError.value = ""
                 _connectionState.value = ConnectionState.CONNECTED
                 _isReconnecting.value = false
                 _lastReconnectResult.value = if (retryAttempt > 0) "success" else "not_needed"
-                reconnectJob?.cancel()
                 reconnectJob = null
                 retryAttempt = 0
             }
 
-            override fun onMessage(webSocket: WebSocket, text: String) {
+            override fun onMessage(socket: WebSocket, text: String) {
+                if (!isCurrentConnection(generation, socket)) return
                 val event = TapEvent.fromJson(text)
-                if (event != null && event.pairId == pairId && event.deviceId != deviceId) {
+                if (
+                    event != null &&
+                    event.pairId == this@WebSocketClient.pairId &&
+                    event.deviceId != this@WebSocketClient.deviceId
+                ) {
                     Log.d(TAG, "received tap from deviceId=${maskDeviceId(event.deviceId)}")
                     onTapReceived?.invoke(event)
                 } else {
-                    Log.d(TAG, "received invalid or self tap message, ignoring")
+                    Log.d(TAG, "received invalid, mismatched, or self tap; ignoring")
                 }
             }
 
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "closing code=$code reason=$reason")
-                webSocket.close(1000, null)
+            override fun onClosing(socket: WebSocket, code: Int, reason: String) {
+                if (!isCurrentConnection(generation, socket)) return
+                Log.d(TAG, "closing code=$code")
+                socket.close(1000, null)
             }
 
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                val closeReason = manualCloseReason ?: when (code) {
-                    4000, 4001, 4002 -> DisconnectReason.SERVER_REJECTED
-                    4008 -> DisconnectReason.RATE_LIMITED
-                    else -> DisconnectReason.SERVER_CLOSED
+            override fun onClosed(socket: WebSocket, code: Int, reason: String) {
+                if (!isCurrentConnection(generation, socket)) return
+                webSocket = null
+
+                val closeReason = disconnectReasonForCloseCode(code)
+                val closeMessage = userMessageForCloseCode(code)
+                if (closeMessage != null) {
+                    _lastError.value = closeMessage
                 }
+
                 recordDisconnect(closeReason)
-                Log.d(TAG, "closed code=$code reason=$reason disconnectReason=${closeReason.label}")
+                Log.d(TAG, "closed code=$code disconnectReason=${closeReason.label}")
                 _connectionState.value = ConnectionState.DISCONNECTED
 
                 if (shouldReconnect(closeReason)) {
-                    Log.d(TAG, "${closeReason.label}, scheduling reconnect")
                     scheduleReconnect()
                 } else {
                     _isReconnecting.value = false
-                    Log.d(TAG, "${closeReason.label}, no reconnect")
+                    _lastReconnectResult.value = "stopped: ${closeReason.label}"
                 }
             }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                val msg = sanitizeErrorMessage(t.message)
-                Log.e(TAG, "failure: $msg")
+            override fun onFailure(socket: WebSocket, throwable: Throwable, response: Response?) {
+                if (!isCurrentConnection(generation, socket)) return
+                webSocket = null
 
-                _lastError.value = msg
+                val message = sanitizeErrorMessage(throwable.message)
+                Log.e(TAG, "failure: $message")
+                _lastError.value = message
                 _connectionState.value = ConnectionState.DISCONNECTED
-
-                val closeReason = manualCloseReason ?: DisconnectReason.NETWORK_ERROR
-                recordDisconnect(closeReason)
-
-                if (shouldReconnect(closeReason)) {
-                    _lastReconnectResult.value = "failed: $msg"
-                    Log.d(TAG, "${closeReason.label}, scheduling reconnect")
-                    scheduleReconnect()
-                } else {
-                    _isReconnecting.value = false
-                    Log.d(TAG, "${closeReason.label}, no reconnect")
-                }
+                recordDisconnect(DisconnectReason.NETWORK_ERROR)
+                _lastReconnectResult.value = "failed: $message"
+                scheduleReconnect()
             }
-        })
+        }
+
+        val newSocket = client.newWebSocket(request, listener)
+        if (generation == connectionGeneration) {
+            webSocket = newSocket
+        } else {
+            newSocket.cancel()
+        }
     }
 
-    fun sendTap(timestamp: Long) {
+    fun sendTap(timestamp: Long): Boolean {
+        if (_connectionState.value != ConnectionState.CONNECTED) {
+            Log.d(TAG, "sendTap skipped: websocket is not connected")
+            return false
+        }
+
+        val socket = webSocket ?: return false
         val event = TapEvent(
             type = "tap",
             pairId = pairId,
             deviceId = deviceId,
             timestamp = timestamp
         )
-        val sent = webSocket?.send(event.toJson()) ?: false
+        val sent = socket.send(event.toJson())
         Log.d(TAG, "sendTap sent=$sent")
+        return sent
     }
 
     fun disconnect(reason: DisconnectReason) {
-        manualCloseReason = reason
-        recordDisconnect(reason)
-        Log.d(TAG, "disconnect requested: reason=${reason.label}")
+        val socket = webSocket
+        ++connectionGeneration
+        webSocket = null
         reconnectJob?.cancel()
         reconnectJob = null
+        retryAttempt = 0
+
+        recordDisconnect(reason)
         _isReconnecting.value = false
         _lastReconnectResult.value = "stopped: ${reason.label}"
         if (reason == DisconnectReason.USER_ACTION) {
             _lastError.value = ""
         }
-        webSocket?.close(1000, reason.label)
-        webSocket = null
+
+        currentUrl = null
+        deviceId = ""
+        pairId = "test-room"
         _connectionState.value = ConnectionState.DISCONNECTED
+
+        Log.d(TAG, "disconnect requested: reason=${reason.label}")
+        socket?.close(1000, reason.label)
     }
 
-    private var retryAttempt = 0
+    fun shutdown(reason: DisconnectReason) {
+        disconnect(reason)
+        client.dispatcher.cancelAll()
+        client.connectionPool.evictAll()
+        client.dispatcher.executorService.shutdown()
+    }
+
+    private fun isCurrentConnection(generation: Long, socket: WebSocket): Boolean {
+        return generation == connectionGeneration && (webSocket == null || webSocket === socket)
+    }
 
     private fun scheduleReconnect() {
-        val url = currentUrl ?: return
+        if (reconnectJob?.isActive == true) return
 
-        reconnectJob?.cancel()
+        val url = currentUrl ?: return
+        val reconnectDeviceId = deviceId
+        val reconnectPairId = pairId
+
         reconnectJob = scope.launch {
             val delayMs = calculateDelay(retryAttempt)
             retryAttempt++
@@ -256,17 +299,32 @@ class WebSocketClient(
             _lastReconnectResult.value = "scheduled attempt $retryAttempt in ${delayMs}ms"
             Log.d(TAG, "scheduling reconnect attempt $retryAttempt in ${delayMs}ms")
             delay(delayMs)
-            connect(url, deviceId, pairId, force = true)
+            connect(url, reconnectDeviceId, reconnectPairId, force = true)
         }
     }
 
     private fun calculateDelay(attempt: Int): Long {
-        val delay = INITIAL_RETRY_DELAY_MS * (1L shl attempt.coerceAtMost(6))
-        return delay.coerceAtMost(MAX_RETRY_DELAY_MS)
+        val delayMs = INITIAL_RETRY_DELAY_MS * (1L shl attempt.coerceAtMost(6))
+        return delayMs.coerceAtMost(MAX_RETRY_DELAY_MS)
     }
 
-    fun resetRetry() {
-        retryAttempt = 0
+    private fun disconnectReasonForCloseCode(code: Int): DisconnectReason {
+        return when (code) {
+            4000, 4001, 4002, 1009 -> DisconnectReason.SERVER_REJECTED
+            4008 -> DisconnectReason.RATE_LIMITED
+            else -> DisconnectReason.SERVER_CLOSED
+        }
+    }
+
+    private fun userMessageForCloseCode(code: Int): String? {
+        return when (code) {
+            4000 -> "服务器拒绝连接：房间参数无效"
+            4001 -> "服务器拒绝连接：鉴权失败"
+            4002 -> "服务器拒绝连接：房间已满"
+            4008 -> "发送频率过高，请稍后重新连接"
+            1009 -> "消息超过服务器允许的大小"
+            else -> null
+        }
     }
 
     private fun recordDisconnect(reason: DisconnectReason) {
