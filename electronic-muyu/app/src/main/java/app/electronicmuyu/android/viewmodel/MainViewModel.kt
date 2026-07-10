@@ -77,6 +77,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val soundManager = SoundManager(application)
     private val vibrationManager = VibrationManager(application)
+    private var connectionStartPending = false
 
     companion object {
         const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
@@ -101,9 +102,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             localDataStore.notificationEnabled.collect { _notificationEnabled.value = it }
         }
         viewModelScope.launch {
-            val resolvedId = localDataStore.getOrCreateDeviceId { UUID.randomUUID().toString() }
-            _deviceId.value = resolvedId
-            _deviceIdDisplay.value = resolvedId.take(8)
+            resolveDeviceId()
         }
         viewModelScope.launch {
             localDataStore.wsUrl.collect { savedUrl ->
@@ -132,22 +131,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startConnection() {
-        val deviceIdValue = _deviceId.value
+        if (connectionStartPending) return
+
+        val currentDeviceId = _deviceId.value
+        if (currentDeviceId.isNotBlank()) {
+            startConnectionWithDeviceId(currentDeviceId)
+            return
+        }
+
+        connectionStartPending = true
+        MuyuConnectionRepository.setLastError("")
+        MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
+        viewModelScope.launch {
+            try {
+                val resolvedDeviceId = resolveDeviceId()
+                startConnectionWithDeviceId(resolvedDeviceId)
+            } catch (_: Exception) {
+                failConnectionStart("无法初始化设备标识")
+            } finally {
+                connectionStartPending = false
+            }
+        }
+    }
+
+    private fun startConnectionWithDeviceId(deviceIdValue: String) {
         val roomIdValue = _roomId.value.trim()
         val fullUrl = buildWebSocketUrl(_serverUrl.value, roomIdValue)
 
         if (deviceIdValue.isBlank() || fullUrl == null) {
-            _wsEnabled.value = false
-            MuyuConnectionRepository.setLastError("连接配置无效，请检查服务器地址和房间 ID")
-            MuyuConnectionRepository.setDisconnectReason(
-                WebSocketClient.DisconnectReason.INVALID_CONFIG,
-                System.currentTimeMillis()
-            )
-            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            failConnectionStart("连接配置无效，请检查服务器地址和房间 ID")
             return
         }
 
-        _wsEnabled.value = true
         MuyuConnectionRepository.setLastError("")
         MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
 
@@ -158,10 +173,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdValue)
             putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdValue)
         }
-        ContextCompat.startForegroundService(context, intent)
+
+        try {
+            ContextCompat.startForegroundService(context, intent)
+            _wsEnabled.value = true
+        } catch (_: Exception) {
+            failConnectionStart("无法启动连接服务")
+        }
+    }
+
+    private fun failConnectionStart(message: String) {
+        _wsEnabled.value = false
+        MuyuConnectionRepository.setServiceRunning(false)
+        MuyuConnectionRepository.setReconnecting(false)
+        MuyuConnectionRepository.setLastError(message)
+        MuyuConnectionRepository.setDisconnectReason(
+            WebSocketClient.DisconnectReason.INVALID_CONFIG,
+            System.currentTimeMillis()
+        )
+        MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+        MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
+    }
+
+    private suspend fun resolveDeviceId(): String {
+        val resolvedId = localDataStore.getOrCreateDeviceId { UUID.randomUUID().toString() }
+        _deviceId.value = resolvedId
+        _deviceIdDisplay.value = resolvedId.take(8)
+        return resolvedId
     }
 
     fun stopConnection() {
+        connectionStartPending = false
         _wsEnabled.value = false
         if (!MuyuConnectionRepository.isServiceRunning.value) {
             MuyuConnectionRepository.setReconnecting(false)
@@ -171,6 +213,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 System.currentTimeMillis()
             )
             MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
             return
         }
 
@@ -178,7 +221,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_DISCONNECT
         }
-        context.startService(intent)
+        try {
+            context.startService(intent)
+        } catch (_: Exception) {
+            MuyuConnectionRepository.setServiceRunning(false)
+            MuyuConnectionRepository.setReconnecting(false)
+            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
+        }
     }
 
     fun onTap() {
@@ -199,7 +249,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 action = MuyuForegroundService.ACTION_SEND_TAP
                 putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, timestamp)
             }
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("提醒未发送：连接服务不可用")
+                MuyuConnectionRepository.setServiceRunning(false)
+                MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+            }
         }
     }
 
