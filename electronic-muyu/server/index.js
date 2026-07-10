@@ -80,6 +80,19 @@ function isValidTap(message, room) {
         && message.timestamp > 0;
 }
 
+function removeClientFromRoom(room, ws, roomHash) {
+    const clients = rooms.get(room);
+    if (!clients) return;
+
+    clients.delete(ws);
+    if (clients.size === 0) {
+        rooms.delete(room);
+        console.log(`[relay] roomHash=${roomHash} 已无连接，清理`);
+    } else {
+        console.log(`[relay] roomHash=${roomHash} 剩余连接数: ${clients.size}`);
+    }
+}
+
 const httpServer = http.createServer((req, res) => {
     let parsedUrl;
     try {
@@ -183,6 +196,22 @@ wss.on('connection', (ws, req) => {
         + `networkHash=${networkHash} connections=${roomSize}`
     );
 
+    ws.on('close', (code, reasonBuffer) => {
+        const reason = safeLogValue(reasonBuffer?.toString() || 'none');
+        console.log(
+            `[relay] [${connId}] 断开 code=${code} reason=${reason} `
+            + `roomHash=${roomHash}`
+        );
+        removeClientFromRoom(room, ws, roomHash);
+    });
+
+    ws.on('error', (err) => {
+        console.error(
+            `[relay] [${connId}] WebSocket 错误:`,
+            safeLogValue(err.message)
+        );
+    });
+
     try {
         ws.send(JSON.stringify({
             type: 'room_info',
@@ -192,6 +221,7 @@ wss.on('connection', (ws, req) => {
         }));
     } catch (err) {
         console.error(`[relay] [${connId}] room_info 发送失败:`, safeLogValue(err.message));
+        removeClientFromRoom(room, ws, roomHash);
         ws.terminate();
         return;
     }
@@ -262,31 +292,6 @@ wss.on('connection', (ws, req) => {
                 safeLogValue(err.message)
             );
         }
-    });
-
-    ws.on('close', (code, reasonBuffer) => {
-        const reason = safeLogValue(reasonBuffer?.toString() || 'none');
-        console.log(
-            `[relay] [${connId}] 断开 code=${code} reason=${reason} `
-            + `roomHash=${roomHash}`
-        );
-        const clients = rooms.get(room);
-        if (clients) {
-            clients.delete(ws);
-            if (clients.size === 0) {
-                rooms.delete(room);
-                console.log(`[relay] roomHash=${roomHash} 已无连接，清理`);
-            } else {
-                console.log(`[relay] roomHash=${roomHash} 剩余连接数: ${clients.size}`);
-            }
-        }
-    });
-
-    ws.on('error', (err) => {
-        console.error(
-            `[relay] [${connId}] WebSocket 错误:`,
-            safeLogValue(err.message)
-        );
     });
 });
 
