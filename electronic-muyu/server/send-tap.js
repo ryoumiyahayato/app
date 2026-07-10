@@ -5,7 +5,7 @@
  *   node send-tap.js
  *
  * 环境变量（可选）：
- *   WS_URL=ws://localhost:8443        # 服务器地址
+ *   WS_URL=ws://localhost:8443        # 服务器地址，可包含已有 query
  *   ROOM_ID=test-room                  # 房间 ID
  *   DEVICE_ID=test-client              # 设备标识
  *
@@ -21,29 +21,60 @@ const WS_URL = process.env.WS_URL || 'ws://localhost:8443';
 const ROOM_ID = process.env.ROOM_ID || 'test-room';
 const DEVICE_ID = process.env.DEVICE_ID || 'test-client';
 
-const url = `${WS_URL}?room=${ROOM_ID}`;
-const ws = new WebSocket(url);
+function maskDeviceId(deviceId) {
+    if (!deviceId || deviceId.length < 8) return '***';
+    return `${deviceId.substring(0, 4)}***${deviceId.substring(deviceId.length - 4)}`;
+}
 
-console.log(`[send-tap] 连接 ${url} ...`);
+function buildWebSocketUrl(baseUrl, roomId) {
+    if (!roomId || !roomId.trim()) {
+        throw new Error('ROOM_ID 不能为空');
+    }
+
+    const targetUrl = new URL(baseUrl);
+    if (targetUrl.protocol !== 'ws:' && targetUrl.protocol !== 'wss:') {
+        throw new Error('WS_URL 必须使用 ws:// 或 wss://');
+    }
+
+    targetUrl.searchParams.set('room', roomId.trim());
+    return targetUrl;
+}
+
+let targetUrl;
+try {
+    targetUrl = buildWebSocketUrl(WS_URL, ROOM_ID);
+} catch (err) {
+    console.error('[send-tap] 配置错误:', err.message);
+    process.exit(1);
+}
+
+const safeUrlForLog = `${targetUrl.protocol}//${targetUrl.host}${targetUrl.pathname}`;
+const ws = new WebSocket(targetUrl.toString());
+
+console.log(`[send-tap] 连接 ${safeUrlForLog} room=<hidden> ...`);
 
 ws.on('open', () => {
     console.log('[send-tap] 已连接');
 
     const tap = {
         type: 'tap',
-        pairId: ROOM_ID,
+        pairId: ROOM_ID.trim(),
         deviceId: DEVICE_ID,
         timestamp: Date.now()
     };
 
     ws.send(JSON.stringify(tap));
-    console.log(`[send-tap] 已发送 tap (room=${ROOM_ID} deviceId=${DEVICE_ID})`);
+    console.log(`[send-tap] 已发送 tap (room=<hidden> deviceId=${maskDeviceId(DEVICE_ID)})`);
 });
 
 ws.on('message', (data) => {
-    const parsed = JSON.parse(data.toString());
-    if (parsed.type === 'room_info') {
-        console.log(`[send-tap] room=${parsed.room} connections=${parsed.connections}`);
+    try {
+        const parsed = JSON.parse(data.toString());
+        if (parsed.type === 'room_info') {
+            console.log(`[send-tap] room=<hidden> connections=${parsed.connections}`);
+        }
+    } catch (err) {
+        console.error('[send-tap] 收到无法解析的消息:', err.message);
     }
 });
 
