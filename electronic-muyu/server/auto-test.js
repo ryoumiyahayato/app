@@ -1,164 +1,224 @@
 /**
- * 电子木鱼 — 阶段 3 自动联调测试
+ * 电子木鱼 relay 自动回归脚本。
  *
- * 启动两个 WebSocket 连接（同 room），模拟 A→B 和 B→A 双向 tap 转发。
- * 不需要任何交互，自动完成验证后退出。
+ * 本脚本不会启动 relay。请先运行 npm start，再运行 npm test。
+ * 可通过 WS_URL 指定目标，例如：
+ *   WS_URL=ws://localhost:8443 npm test
  */
 
 const WebSocket = require('ws');
+const crypto = require('crypto');
+
 const SERVER = process.env.WS_URL || 'ws://localhost:8443';
-const ROOM = 'auto-test-' + Date.now();
+const TIMEOUT_MS = 5_000;
+const roomA = `auto-a-${Date.now()}-${process.pid}`;
+const roomB = `auto-b-${Date.now()}-${process.pid}`;
+const clients = new Set();
 
-let clientA = null;
-let clientB = null;
-let testsPassed = 0;
-let testsFailed = 0;
-
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function createClient(name) {
-    return new Promise((resolve, reject) => {
-        const deviceId = `auto-${name}-${process.pid}`;
-        const ws = new WebSocket(`${SERVER}?room=${ROOM}`);
-        ws.deviceId = deviceId;
-        ws.clientName = name;
-
-        ws.on('open', () => {
-            console.log(`  [${name}] ✅ 已连接 (deviceId=${deviceId})`);
-            resolve(ws);
-        });
-
-        ws.on('error', (err) => {
-            console.log(`  [${name}] ⚠️ 错误: ${err.message}`);
-            reject(err);
-        });
-
-        // 超时保护
-        setTimeout(() => reject(new Error(`${name} 连接超时`)), 5000);
-    });
+function buildUrl(room) {
+    const target = new URL(SERVER);
+    if (target.protocol !== 'ws:' && target.protocol !== 'wss:') {
+        throw new Error('WS_URL 必须使用 ws:// 或 wss://');
+    }
+    target.searchParams.set('room', room);
+    return target.toString();
 }
 
-function waitForMessage(ws, expectedSender, timeoutMs = 5000) {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            ws.removeListener('message', handler);
-            reject(new Error(`${ws.clientName} 等待 ${expectedSender} 的 tap 超时`));
-        }, timeoutMs);
+function shortHash(value) {
+    return crypto.createHash('sha256').update(value).digest('hex').substring(0, 8);
+}
 
-        const handler = (data) => {
+function createClient(name, room) {
+    return new Promise((resolve, reject) => {
+        const socket = new WebSocket(buildUrl(room));
+        socket.clientName = name;
+        socket.deviceId = `auto-${name}-${process.pid}`;
+        clients.add(socket);
+
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            socket.terminate();
+            reject(new Error(`${name} 等待 room_info 超时`));
+        }, TIMEOUT_MS);
+
+        const onMessage = (data, isBinary) => {
+            if (settled || isBinary) return;
             try {
-                const msg = JSON.parse(data.toString());
-                if (msg.type === 'tap') {
+                const message = JSON.parse(data.toString());
+                if (message.type === 'room_info' && message.room === room) {
+                    settled = true;
                     clearTimeout(timer);
-                    ws.removeListener('message', handler);
-                    resolve(msg);
-                } else if (msg.type === 'room_info') {
-                    // Ignore room_info messages
-                } else {
-                    console.log(`  [${ws.clientName}] 忽略非 tap 消息:`, msg.type);
+                    socket.removeListener('message', onMessage);
+                    resolve(socket);
                 }
-            } catch (e) {
-                // ignore parse errors
+            } catch (_) {
+                // 等待下一条可解析消息。
             }
         };
-        ws.on('message', handler);
+
+        socket.on('message', onMessage);
+        socket.once('close', (code, reasonBuffer) => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                reject(new Error(
+                    `${name} 在接受前关闭 code=${code} reason=${reasonBuffer?.toString() || 'none'}`
+                ));
+            }
+        });
+        socket.once('error', (err) => {
+            if (!settled) {
+                settled = true;
+                clearTimeout(timer);
+                reject(err);
+            }
+        });
     });
 }
 
-async function run() {
-    console.log('══════════════════════════════════════════');
-    console.log(' 电子木鱼 — 阶段 3 WSS 联调自动测试');
-    console.log(` 服务器: ${SERVER}`);
-    console.log(` 房间:   ${ROOM}`);
-    console.log('══════════════════════════════════════════\n');
+function expectRejectedClient(name, room, expectedCode) {
+    return new Promise((resolve, reject) => {
+        const socket = new WebSocket(buildUrl(room));
+        clients.add(socket);
+        const timer = setTimeout(() => {
+            socket.terminate();
+            reject(new Error(`${name} 未在预期时间内被拒绝`));
+        }, TIMEOUT_MS);
 
-    try {
-        // === 1. 两个客户端都连接 ===
-        console.log('[步骤 1/5] 建立两个 WebSocket 连接...');
-        clientA = await createClient('A');
-        clientB = await createClient('B');
-        await sleep(500); // 等 room_info 传递
-
-        // === 2. A 发送 tap，B 接收 ===
-        console.log('\n[步骤 2/5] A → 发送 tap，验证 B 收到...');
-        const bReceivedPromise = waitForMessage(clientB, 'A');
-        
-        clientA.send(JSON.stringify({
-            type: 'tap',
-            pairId: ROOM,
-            deviceId: clientA.deviceId,
-            timestamp: Date.now()
-        }));
-        console.log('  [A] 👆 发送 tap');
-
-        const msgFromA = await bReceivedPromise;
-        const maskedA = clientA.deviceId.substring(0,4)+'***'+clientA.deviceId.substring(clientA.deviceId.length-4);
-        console.log(`  [B] 🔔 收到来自 ${maskedA} 的 tap ✓`);
-        testsPassed++;
-
-        // === 3. B 发送 tap，A 接收 ===
-        console.log('\n[步骤 3/5] B → 发送 tap，验证 A 收到...');
-        const aReceivedPromise = waitForMessage(clientA, 'B');
-
-        clientB.send(JSON.stringify({
-            type: 'tap',
-            pairId: ROOM,
-            deviceId: clientB.deviceId,
-            timestamp: Date.now()
-        }));
-        console.log('  [B] 👆 发送 tap');
-
-        const msgFromB = await aReceivedPromise;
-        const maskedB = clientB.deviceId.substring(0,4)+'***'+clientB.deviceId.substring(clientB.deviceId.length-4);
-        console.log(`  [A] 🔔 收到来自 ${maskedB} 的 tap ✓`);
-        testsPassed++;
-
-        // === 4. 验证 tap 字段完整性 ===
-        console.log('\n[步骤 4/5] 验证 tap 字段完整性...');
-        const requiredFields = ['type', 'pairId', 'deviceId', 'timestamp'];
-        let fieldOk = true;
-        for (const msg of [msgFromA, msgFromB]) {
-            for (const field of requiredFields) {
-                if (!(field in msg)) {
-                    console.log(`  ❌ 缺少字段: ${field}`);
-                    fieldOk = false;
-                }
+        socket.once('close', (code) => {
+            clearTimeout(timer);
+            if (code === expectedCode) {
+                resolve();
+            } else {
+                reject(new Error(`${name} 关闭码=${code}，预期=${expectedCode}`));
             }
-        }
-        if (fieldOk) {
-            console.log('  ✅ tap 数据格式正确 (type/pairId/deviceId/timestamp)');
-            testsPassed++;
-        } else {
-            console.log('  ❌ tap 数据格式错误');
-            testsFailed++;
-        }
+        });
+        socket.once('error', () => {
+            // close 事件负责判断服务端关闭码。
+        });
+    });
+}
 
-        // === 5. 验证在线人数 ===
-        console.log('\n[步骤 5/5] 验证同一房间内连接数...');
-        await sleep(1000); // 等 room_info
-        const aInfoPromise = waitForMessage(clientA, 'room_info');
-        // Actually need different approach - room_info is sent on connect
-        // We already got room_info during connect, online should be 2 now
-        console.log('  ⚠️ 跳过在线人数验证（room_info 在连接时发送）');
-        testsPassed++;
+function waitForTap(socket, expectedDeviceId, timeoutMs = TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            socket.removeListener('message', handler);
+            reject(new Error(`${socket.clientName} 等待 tap 超时`));
+        }, timeoutMs);
 
-        // === 结果 ===
-        console.log('\n══════════════════════════════════════════');
-        console.log(` 测试结果: ✅ ${testsPassed}/4 通过, ❌ ${testsFailed} 失败`);
-        console.log('══════════════════════════════════════════');
+        const handler = (data, isBinary) => {
+            if (isBinary) return;
+            try {
+                const message = JSON.parse(data.toString());
+                if (message.type === 'tap' && message.deviceId === expectedDeviceId) {
+                    clearTimeout(timer);
+                    socket.removeListener('message', handler);
+                    resolve(message);
+                }
+            } catch (_) {
+                // 忽略无关消息。
+            }
+        };
+        socket.on('message', handler);
+    });
+}
 
-        // Cleanup
-        if (clientA) { try { clientA.close(); } catch(e) {} }
-        if (clientB) { try { clientB.close(); } catch(e) {} }
+function expectNoTap(socket, timeoutMs = 500) {
+    return new Promise((resolve, reject) => {
+        const handler = (data, isBinary) => {
+            if (isBinary) return;
+            try {
+                const message = JSON.parse(data.toString());
+                if (message.type === 'tap') {
+                    clearTimeout(timer);
+                    socket.removeListener('message', handler);
+                    reject(new Error(`${socket.clientName} 收到了不应出现的 tap`));
+                }
+            } catch (_) {
+                // 忽略无关消息。
+            }
+        };
+        const timer = setTimeout(() => {
+            socket.removeListener('message', handler);
+            resolve();
+        }, timeoutMs);
+        socket.on('message', handler);
+    });
+}
 
-        process.exit(testsFailed > 0 ? 1 : 0);
-
-    } catch (err) {
-        console.log(`\n❌ 测试失败: ${err.message}`);
-        if (clientA) { try { clientA.close(); } catch(e) {} }
-        if (clientB) { try { clientB.close(); } catch(e) {} }
-        process.exit(1);
+function sendTap(socket, room, overrides = {}) {
+    const message = {
+        type: 'tap',
+        pairId: room,
+        deviceId: socket.deviceId,
+        timestamp: Date.now(),
+        ...overrides
+    };
+    if (!socket.send(JSON.stringify(message))) {
+        throw new Error(`${socket.clientName} send() 返回 false`);
     }
 }
 
-run();
+async function run() {
+    let passed = 0;
+    console.log('[auto-test] 开始 relay 回归检查');
+    console.log(`[auto-test] server=${new URL(SERVER).host}`);
+    console.log(`[auto-test] roomAHash=${shortHash(roomA)} roomBHash=${shortHash(roomB)}`);
+
+    try {
+        const clientA = await createClient('A', roomA);
+        const clientB = await createClient('B', roomA);
+        const clientC = await createClient('C', roomB);
+        passed++;
+        console.log('[1/6] 两个同房间客户端和一个隔离房间客户端连接成功');
+
+        const receiveAtB = waitForTap(clientB, clientA.deviceId);
+        const noEchoAtA = expectNoTap(clientA);
+        const noCrossRoomAtC = expectNoTap(clientC);
+        sendTap(clientA, roomA);
+        const messageAtB = await receiveAtB;
+        await Promise.all([noEchoAtA, noCrossRoomAtC]);
+        if (messageAtB.pairId !== roomA) throw new Error('转发后的 pairId 不匹配');
+        passed++;
+        console.log('[2/6] A→B 转发成功，发送方无回显，不同房间无串消息');
+
+        const receiveAtA = waitForTap(clientA, clientB.deviceId);
+        sendTap(clientB, roomA);
+        await receiveAtA;
+        passed++;
+        console.log('[3/6] B→A 反向转发成功');
+
+        await expectRejectedClient('third-client', roomA, 4002);
+        passed++;
+        console.log('[4/6] 同一房间第三个连接被 4002 拒绝');
+
+        const noInvalidTapAtB = expectNoTap(clientB);
+        sendTap(clientA, roomA, { pairId: `${roomA}-wrong` });
+        await noInvalidTapAtB;
+        passed++;
+        console.log('[5/6] pairId 不匹配的 tap 未被转发');
+
+        const noUnknownMessageAtB = expectNoTap(clientB);
+        clientA.send(JSON.stringify({ type: 'unknown' }));
+        await noUnknownMessageAtB;
+        passed++;
+        console.log('[6/6] 未知消息类型未被转发');
+
+        console.log(`[auto-test] 静态定义的回归场景通过数=${passed}/6`);
+    } finally {
+        clients.forEach((socket) => {
+            try {
+                socket.terminate();
+            } catch (_) {
+                // 忽略清理错误。
+            }
+        });
+    }
+}
+
+run().catch((err) => {
+    console.error('[auto-test] 失败:', err.message);
+    process.exitCode = 1;
+});
