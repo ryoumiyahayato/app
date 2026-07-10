@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -19,6 +20,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -42,7 +46,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
         NotificationHelper.createNotificationChannel(this)
 
         enableEdgeToEdge()
@@ -64,13 +67,6 @@ class MainActivity : ComponentActivity() {
             onPermissionResult = null
         }
     }
-
-    fun openNotificationSettings() {
-        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-            data = Uri.fromParts("package", packageName, null)
-        }
-        startActivity(intent)
-    }
 }
 
 @Composable
@@ -78,6 +74,7 @@ fun MuyuApp(
     onRequestNotificationPermission: (callback: (Boolean) -> Unit) -> Unit = {}
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val viewModel: MainViewModel = viewModel()
     val meriCount by viewModel.meriCount.collectAsState()
     val receivedCount by viewModel.receivedCount.collectAsState()
@@ -100,9 +97,29 @@ fun MuyuApp(
     val navController = rememberNavController()
 
     var notificationPermissionGranted by remember { mutableStateOf(false) }
+    var notificationDeliveryStatus by remember {
+        mutableStateOf(NotificationHelper.DeliveryStatus.PERMISSION_DENIED)
+    }
+
+    fun refreshNotificationState() {
+        notificationPermissionGranted = NotificationHelper.hasNotificationPermission(context)
+        notificationDeliveryStatus = NotificationHelper.getDeliveryStatus(context)
+    }
 
     LaunchedEffect(Unit) {
-        notificationPermissionGranted = viewModel.checkNotificationPermissionState()
+        refreshNotificationState()
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshNotificationState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
     }
 
     NavHost(navController = navController, startDestination = "main") {
@@ -128,6 +145,7 @@ fun MuyuApp(
                 vibrationEnabled = viewModel.vibrationEnabled.collectAsState().value,
                 notificationEnabled = notificationEnabled,
                 notificationPermissionGranted = notificationPermissionGranted,
+                notificationDeliveryStatus = notificationDeliveryStatus.label,
                 connectionState = connectionState,
                 wsEnabled = wsEnabled,
                 lastDisconnectReason = lastDisconnectReason.label,
@@ -144,19 +162,18 @@ fun MuyuApp(
                 onVibrationToggle = { viewModel.setVibrationEnabled(it) },
                 onNotificationToggle = { enabled ->
                     if (enabled) {
-                        if (viewModel.checkNotificationPermissionState()) {
+                        if (NotificationHelper.hasNotificationPermission(context)) {
                             viewModel.setNotificationEnabled(true)
-                            notificationPermissionGranted = true
+                            refreshNotificationState()
                         } else {
                             onRequestNotificationPermission { isGranted ->
-                                notificationPermissionGranted = isGranted
-                                if (isGranted) {
-                                    viewModel.setNotificationEnabled(true)
-                                }
+                                viewModel.setNotificationEnabled(isGranted)
+                                refreshNotificationState()
                             }
                         }
                     } else {
                         viewModel.setNotificationEnabled(false)
+                        refreshNotificationState()
                     }
                 },
                 onOpenNotificationSettings = {
@@ -166,19 +183,19 @@ fun MuyuApp(
                     context.startActivity(intent)
                 },
                 onSendTestNotification = {
-                    if (viewModel.checkNotificationPermissionState()) {
-                        notificationPermissionGranted = true
+                    if (NotificationHelper.hasNotificationPermission(context)) {
                         NotificationHelper.createNotificationChannel(context)
                         NotificationHelper.sendMeritReminderNotification(context)
+                        refreshNotificationState()
                     } else {
                         onRequestNotificationPermission { isGranted ->
-                            notificationPermissionGranted = isGranted
                             if (isGranted) {
                                 NotificationHelper.createNotificationChannel(context)
                                 NotificationHelper.sendMeritReminderNotification(context)
                             } else {
                                 Log.d("ElectronicMuyu", "notify skipped: POST_NOTIFICATIONS denied")
                             }
+                            refreshNotificationState()
                         }
                     }
                 },
@@ -191,10 +208,6 @@ fun MuyuApp(
                 onClearCounts = { viewModel.clearAllCounts() },
                 onNavigateBack = { navController.popBackStack() }
             )
-
-            LaunchedEffect(Unit) {
-                notificationPermissionGranted = viewModel.checkNotificationPermissionState()
-            }
         }
     }
 }
