@@ -108,7 +108,6 @@ fun SettingsScreen(
         ) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Sound & Vibration section
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -128,7 +127,6 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Sound toggle
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -146,7 +144,6 @@ fun SettingsScreen(
 
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
 
-                    // Vibration toggle
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -166,7 +163,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Notification section (Phase 4A)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -186,7 +182,6 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Notification toggle
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -202,7 +197,6 @@ fun SettingsScreen(
                         )
                     }
 
-                    // Permission status hint
                     Spacer(modifier = Modifier.height(4.dp))
                     if (notificationPermissionGranted) {
                         Text(
@@ -218,8 +212,16 @@ fun SettingsScreen(
                         )
                     }
 
-                    // Debug 调试按钮：阶段 4A 真机排查通知链路时固定显示。
                     Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = onOpenNotificationSettings,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("打开系统通知设置")
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
                     Button(
                         onClick = onSendTestNotification,
                         modifier = Modifier.fillMaxWidth(),
@@ -232,7 +234,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Connection config section (Phase 5A)
             ConnectionConfigCard(
                 serverUrl = serverUrl,
                 roomId = roomId,
@@ -243,7 +244,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Connection section (Phase 3)
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -263,7 +263,6 @@ fun SettingsScreen(
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Connection state display
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -303,7 +302,7 @@ fun SettingsScreen(
                         }
                     }
 
-                    if (connectionState == ConnectionState.DISCONNECTED) {
+                    if (isReconnecting) {
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = "断线自动重连中…",
@@ -333,7 +332,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Actions section
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
@@ -368,7 +366,6 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // About section
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),
