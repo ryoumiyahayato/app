@@ -1,5 +1,6 @@
 package app.electronicmuyu.android.ui.screen
 
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,6 +45,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private const val MAX_ROOM_ID_LENGTH = 64
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -51,6 +54,7 @@ fun SettingsScreen(
     vibrationEnabled: Boolean,
     notificationEnabled: Boolean,
     notificationPermissionGranted: Boolean,
+    notificationDeliveryStatus: String,
     connectionState: ConnectionState,
     wsEnabled: Boolean,
     lastDisconnectReason: String,
@@ -70,7 +74,7 @@ fun SettingsScreen(
     onSendTestNotification: () -> Unit = {},
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onSaveConfig: (serverUrl: String, roomId: String) -> Unit,
+    onSaveConfig: (serverUrl: String, roomId: String) -> Boolean,
     onResetDefaults: () -> Unit,
     onClearCounts: () -> Unit,
     onNavigateBack: () -> Unit
@@ -198,19 +202,28 @@ fun SettingsScreen(
                     }
 
                     Spacer(modifier = Modifier.height(4.dp))
-                    if (notificationPermissionGranted) {
-                        Text(
-                            text = "通知权限：已授权",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFF4CAF50)
-                        )
-                    } else {
-                        Text(
-                            text = "通知权限：未授权",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color(0xFFF44336)
-                        )
-                    }
+                    Text(
+                        text = if (notificationPermissionGranted) {
+                            "通知权限：已授权"
+                        } else {
+                            "通知权限：未授权"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (notificationPermissionGranted) {
+                            Color(0xFF4CAF50)
+                        } else {
+                            Color(0xFFF44336)
+                        }
+                    )
+                    Text(
+                        text = "实际状态：$notificationDeliveryStatus",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (notificationDeliveryStatus == "通知可用") {
+                            Color(0xFF4CAF50)
+                        } else {
+                            Color(0xFFF44336)
+                        }
+                    )
 
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedButton(
@@ -418,7 +431,7 @@ private fun ConnectionConfigCard(
     serverUrl: String,
     roomId: String,
     deviceIdDisplay: String,
-    onSaveConfig: (serverUrl: String, roomId: String) -> Unit,
+    onSaveConfig: (serverUrl: String, roomId: String) -> Boolean,
     onResetDefaults: () -> Unit
 ) {
     var localServerUrl by remember(serverUrl) { mutableStateOf(serverUrl) }
@@ -490,25 +503,20 @@ private fun ConnectionConfigCard(
 
             Button(
                 onClick = {
-                    var hasError = false
-                    if (localServerUrl.isBlank()) {
-                        serverUrlError = "服务器地址不能为空"
-                        hasError = true
-                    } else if (!localServerUrl.startsWith("ws://") && !localServerUrl.startsWith("wss://")) {
-                        serverUrlError = "必须以 ws:// 或 wss:// 开头"
-                        hasError = true
-                    } else {
-                        serverUrlError = null
-                    }
-                    if (localRoomId.isBlank()) {
-                        roomIdError = "房间 ID 不能为空"
-                        hasError = true
-                    } else {
-                        roomIdError = null
-                    }
-                    if (!hasError) {
-                        onSaveConfig(localServerUrl, localRoomId)
-                        savedMessage = "配置已保存"
+                    val normalizedServerUrl = localServerUrl.trim()
+                    val normalizedRoomId = localRoomId.trim()
+                    serverUrlError = validateServerUrl(normalizedServerUrl)
+                    roomIdError = validateRoomId(normalizedRoomId)
+
+                    if (serverUrlError == null && roomIdError == null) {
+                        if (onSaveConfig(normalizedServerUrl, normalizedRoomId)) {
+                            localServerUrl = normalizedServerUrl
+                            localRoomId = normalizedRoomId
+                            savedMessage = "配置已保存"
+                        } else {
+                            serverUrlError = "配置未保存，请检查服务器地址"
+                            savedMessage = null
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),
@@ -533,6 +541,11 @@ private fun ConnectionConfigCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
+            Text(
+                text = "ws:// 仅用于本地或短期测试；长期公网使用应切换为 wss://",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
@@ -551,6 +564,30 @@ private fun ConnectionConfigCard(
                 Text("恢复默认")
             }
         }
+    }
+}
+
+private fun validateServerUrl(serverUrl: String): String? {
+    if (serverUrl.isBlank()) return "服务器地址不能为空"
+    return try {
+        val uri = Uri.parse(serverUrl)
+        val scheme = uri.scheme?.lowercase()
+        when {
+            scheme != "ws" && scheme != "wss" -> "必须以 ws:// 或 wss:// 开头"
+            uri.host.isNullOrBlank() -> "服务器地址必须包含主机名或 IP"
+            else -> null
+        }
+    } catch (_: Exception) {
+        "服务器地址格式无效"
+    }
+}
+
+private fun validateRoomId(roomId: String): String? {
+    return when {
+        roomId.isBlank() -> "房间 ID 不能为空"
+        roomId.length > MAX_ROOM_ID_LENGTH -> "房间 ID 不能超过 $MAX_ROOM_ID_LENGTH 个字符"
+        roomId.any { it.code in 0..31 || it.code == 127 } -> "房间 ID 不能包含控制字符"
+        else -> null
     }
 }
 
