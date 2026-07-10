@@ -5,7 +5,7 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
 
     <!-- usesCleartextTraffic 仅用于开发阶段 ws:// 本地和短期公网测试。
          正式发布切换到 wss:// 后必须移除。 -->
@@ -28,10 +28,12 @@
             </intent-filter>
         </activity>
 
+        <!-- 两台设备之间持续传递 tap 提醒事件，使用 remoteMessaging 避免 dataSync
+             在 targetSdk 35+ 上受到后台 6 小时/24 小时累计时限。 -->
         <service
             android:name=".service.MuyuForegroundService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="remoteMessaging" />
 
     </application>
 
