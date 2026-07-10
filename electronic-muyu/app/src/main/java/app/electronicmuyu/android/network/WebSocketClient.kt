@@ -45,6 +45,8 @@ class WebSocketClient(
         PROCESS_LIFECYCLE_STOP("process_lifecycle_stop"),
         NETWORK_ERROR("network_error"),
         SERVER_CLOSED("server_closed"),
+        SERVER_REJECTED("server_rejected"),
+        RATE_LIMITED("rate_limited"),
         SERVICE_TIMEOUT("service_timeout"),
         SERVICE_DESTROYED("service_destroyed"),
         INVALID_CONFIG("invalid_config"),
@@ -59,7 +61,9 @@ class WebSocketClient(
     private fun shortHash(value: String): String {
         if (value.isBlank()) return "none"
         val bytes = MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
-        return bytes.take(4).joinToString("") { "%02x".format(it) }
+        return bytes.take(4).joinToString("") { byte ->
+            "%02x".format(byte.toInt() and 0xff)
+        }
     }
 
     private fun safeUrlForLog(url: String): String {
@@ -146,6 +150,7 @@ class WebSocketClient(
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "connected roomHash=${shortHash(pairId)}")
+                _lastError.value = ""
                 _connectionState.value = ConnectionState.CONNECTED
                 _isReconnecting.value = false
                 _lastReconnectResult.value = if (retryAttempt > 0) "success" else "not_needed"
@@ -170,7 +175,11 @@ class WebSocketClient(
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                val closeReason = manualCloseReason ?: DisconnectReason.SERVER_CLOSED
+                val closeReason = manualCloseReason ?: when (code) {
+                    4000, 4001, 4002 -> DisconnectReason.SERVER_REJECTED
+                    4008 -> DisconnectReason.RATE_LIMITED
+                    else -> DisconnectReason.SERVER_CLOSED
+                }
                 recordDisconnect(closeReason)
                 Log.d(TAG, "closed code=$code reason=$reason disconnectReason=${closeReason.label}")
                 _connectionState.value = ConnectionState.DISCONNECTED
@@ -225,6 +234,9 @@ class WebSocketClient(
         reconnectJob = null
         _isReconnecting.value = false
         _lastReconnectResult.value = "stopped: ${reason.label}"
+        if (reason == DisconnectReason.USER_ACTION) {
+            _lastError.value = ""
+        }
         webSocket?.close(1000, reason.label)
         webSocket = null
         _connectionState.value = ConnectionState.DISCONNECTED
