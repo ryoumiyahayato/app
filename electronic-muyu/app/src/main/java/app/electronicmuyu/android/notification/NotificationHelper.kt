@@ -1,12 +1,12 @@
 package app.electronicmuyu.android.notification
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
-import android.Manifest
-import android.content.pm.PackageManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -15,33 +15,20 @@ import androidx.core.content.ContextCompat
 import app.electronicmuyu.android.MainActivity
 import app.electronicmuyu.android.R
 
-/**
- * 阶段 4A：通知权限与通知栏提醒骨架
- *
- * NotificationHelper 只负责三件事：
- * 1. 创建通知渠道
- * 2. 检查通知权限
- * 3. 发送"收到一次功德提醒"通知
- *
- * 不做：
- * - 常驻通知
- * - Foreground Service 通知
- * - 聊天通知
- * - 历史消息通知
- * - 多消息聚合
- * - 回复按钮 / 输入框 / 自由文本
- * - 离线消息 / 账号相关内容
- */
 object NotificationHelper {
+
+    enum class DeliveryStatus(val label: String) {
+        AVAILABLE("通知可用"),
+        PERMISSION_DENIED("通知权限未授权"),
+        APP_NOTIFICATIONS_DISABLED("系统已关闭本应用通知"),
+        CHANNEL_DISABLED("功德提醒通知渠道已关闭")
+    }
 
     private const val CHANNEL_ID = "merit_reminder"
     private const val CHANNEL_NAME = "功德提醒"
     private const val NOTIFICATION_ID = 1001
     private const val TAG = "ElectronicMuyu"
 
-    /**
-     * 创建通知渠道。应在 Application 启动或首次需要时调用一次即可。
-     */
     fun createNotificationChannel(context: Context) {
         val channel = NotificationChannel(
             CHANNEL_ID,
@@ -55,9 +42,6 @@ object NotificationHelper {
         notificationManager.createNotificationChannel(channel)
     }
 
-    /**
-     * 检查当前是否有 POST_NOTIFICATIONS 权限
-     */
     fun hasNotificationPermission(context: Context): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             ContextCompat.checkSelfPermission(
@@ -65,7 +49,6 @@ object NotificationHelper {
                 Manifest.permission.POST_NOTIFICATIONS
             ) == PackageManager.PERMISSION_GRANTED
         } else {
-            // Android 12 及以下不需要运行时权限，通知默认开启
             true
         }
     }
@@ -77,32 +60,30 @@ object NotificationHelper {
     fun getChannelImportance(context: Context): Int {
         val notificationManager =
             context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        return notificationManager.getNotificationChannel(CHANNEL_ID)?.importance ?: -1
+        return notificationManager.getNotificationChannel(CHANNEL_ID)?.importance
+            ?: NotificationManager.IMPORTANCE_NONE
     }
 
-    /**
-     * 发送"收到一次功德提醒"通知
-     *
-     * @param context 上下文
-     * @return 是否成功发送（false 表示无权限或发送失败）
-     */
-    fun sendMeritReminderNotification(context: Context): Boolean {
+    fun getDeliveryStatus(context: Context): DeliveryStatus {
         if (!hasNotificationPermission(context)) {
-            Log.e(TAG, "notify failed: notification permission not granted")
-            return false
+            return DeliveryStatus.PERMISSION_DENIED
         }
-
         if (!areNotificationsEnabled(context)) {
-            Log.e(TAG, "notify failed: notifications disabled by system")
-            return false
+            return DeliveryStatus.APP_NOTIFICATIONS_DISABLED
         }
-
         if (getChannelImportance(context) == NotificationManager.IMPORTANCE_NONE) {
-            Log.e(TAG, "notify failed: channel importance is IMPORTANCE_NONE")
+            return DeliveryStatus.CHANNEL_DISABLED
+        }
+        return DeliveryStatus.AVAILABLE
+    }
+
+    fun sendMeritReminderNotification(context: Context): Boolean {
+        val deliveryStatus = getDeliveryStatus(context)
+        if (deliveryStatus != DeliveryStatus.AVAILABLE) {
+            Log.e(TAG, "notify skipped: ${deliveryStatus.name}")
             return false
         }
 
-        // 点击通知回到 MainActivity
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -124,12 +105,15 @@ object NotificationHelper {
             .build()
 
         return try {
-            Log.d(TAG, "NotificationHelper: calling notify($NOTIFICATION_ID)")
             NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
             Log.d(TAG, "notify success")
             true
-        } catch (e: Exception) {
-            Log.e(TAG, "notify failed: ${e::class.simpleName} - ${e.message}", e)
+        } catch (exception: Exception) {
+            Log.e(
+                TAG,
+                "notify failed: ${exception::class.simpleName} - ${exception.message}",
+                exception
+            )
             false
         }
     }
