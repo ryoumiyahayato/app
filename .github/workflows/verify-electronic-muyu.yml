@@ -1,0 +1,68 @@
+name: Verify electronic-muyu
+
+on:
+  push:
+    branches:
+      - main
+      - fix/z-audit-issues-20260710
+  pull_request:
+    paths:
+      - 'electronic-muyu/**'
+      - '.github/workflows/verify-electronic-muyu.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: electronic-muyu-verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: electronic-muyu/server/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        shell: pwsh
+        run: sdkmanager.bat 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run deterministic local verification
+        shell: pwsh
+        working-directory: electronic-muyu
+        run: .\verify-local.ps1
+
+      - name: Upload Android verification outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electronic-muyu-verification-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            electronic-muyu/app/build/reports/**
+            electronic-muyu/app/build/test-results/**
+            electronic-muyu/app/build/outputs/apk/**
+            electronic-muyu/app/build/outputs/mapping/release/mapping.txt
