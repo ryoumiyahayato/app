@@ -19,6 +19,9 @@ object MuyuConnectionRepository {
     private val _lastDisconnectAtMillis = MutableStateFlow<Long?>(null)
     val lastDisconnectAtMillis: StateFlow<Long?> = _lastDisconnectAtMillis.asStateFlow()
 
+    private val _lastError = MutableStateFlow("")
+    val lastError: StateFlow<String> = _lastError.asStateFlow()
+
     private val _isReconnecting = MutableStateFlow(false)
     val isReconnecting: StateFlow<Boolean> = _isReconnecting.asStateFlow()
 
@@ -47,6 +50,10 @@ object MuyuConnectionRepository {
     fun setDisconnectReason(reason: WebSocketClient.DisconnectReason, atMillis: Long?) {
         _lastDisconnectReason.value = reason
         _lastDisconnectAtMillis.value = atMillis
+    }
+
+    fun setLastError(error: String) {
+        _lastError.value = error
     }
 
     fun setReconnecting(isReconnecting: Boolean) {
