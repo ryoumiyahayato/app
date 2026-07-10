@@ -23,8 +23,8 @@ class SoundManager(context: Context) {
         .setAudioAttributes(audioAttributes)
         .build()
 
-    private val muyuHitId: Int
-    private val notificationTapId: Int
+    private var muyuHitId = 0
+    private var notificationTapId = 0
 
     init {
         soundPool.setOnLoadCompleteListener { _, sampleId, status ->
@@ -79,6 +79,7 @@ class SoundManager(context: Context) {
     }
 
     private fun markPendingUnlessLoaded(sampleId: Int, isMuyu: Boolean): Boolean {
+        if (sampleId == 0) return false
         return synchronized(lock) {
             if (released) return@synchronized false
             if (sampleId in loadedSamples) {
