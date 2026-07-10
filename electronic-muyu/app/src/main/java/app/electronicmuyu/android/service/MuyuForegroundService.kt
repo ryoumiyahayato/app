@@ -187,17 +187,18 @@ class MuyuForegroundService : Service() {
         val receivedAtMillis = System.currentTimeMillis()
         val appInForeground = MuyuConnectionRepository.appForeground.value
 
+        // 先记录 UI 事件，避免 DataStore I/O 延迟前台声音、震动和 Snackbar。
+        MuyuConnectionRepository.recordReceivedTap(
+            receivedAtMillis = receivedAtMillis,
+            enqueueForForegroundUi = appInForeground
+        )
+
         try {
             localDataStore.incrementReceivedCount()
         } catch (error: Exception) {
             Log.e(TAG, "failed to persist received count", error)
             MuyuConnectionRepository.setLastError("收到提醒，但计数保存失败")
         }
-
-        MuyuConnectionRepository.recordReceivedTap(
-            receivedAtMillis = receivedAtMillis,
-            enqueueForForegroundUi = appInForeground
-        )
 
         if (appInForeground) {
             Log.d(TAG, "foreground tap received, queued for in-app feedback")
@@ -213,7 +214,10 @@ class MuyuForegroundService : Service() {
 
         if (notificationEnabled) {
             Log.d(TAG, "background tap received, sending notification")
-            NotificationHelper.sendMeritReminderNotification(applicationContext)
+            val sent = NotificationHelper.sendMeritReminderNotification(applicationContext)
+            if (!sent) {
+                MuyuConnectionRepository.setLastError("收到提醒，但系统通知未能送达")
+            }
         } else {
             Log.d(TAG, "background tap received while notification preference is disabled")
         }
