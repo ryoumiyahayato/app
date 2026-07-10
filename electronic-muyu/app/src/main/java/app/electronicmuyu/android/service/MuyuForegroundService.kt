@@ -42,9 +42,9 @@ class MuyuForegroundService : Service() {
         NotificationHelper.createNotificationChannel(applicationContext)
         createConnectionNotificationChannel()
 
-        wsClient.onTapReceived = { event ->
+        wsClient.onTapReceived = {
             serviceScope.launch {
-                handleRemoteTap(event.timestamp)
+                handleRemoteTap()
             }
         }
 
@@ -183,17 +183,39 @@ class MuyuForegroundService : Service() {
         )
     }
 
-    private suspend fun handleRemoteTap(timestamp: Long) {
-        localDataStore.incrementReceivedCount()
-        MuyuConnectionRepository.emitReceivedTap(timestamp)
-
-        val notificationEnabled = localDataStore.notificationEnabled.first()
+    private suspend fun handleRemoteTap() {
+        val receivedAtMillis = System.currentTimeMillis()
         val appInForeground = MuyuConnectionRepository.appForeground.value
-        if (!appInForeground && notificationEnabled) {
+
+        try {
+            localDataStore.incrementReceivedCount()
+        } catch (error: Exception) {
+            Log.e(TAG, "failed to persist received count", error)
+            MuyuConnectionRepository.setLastError("收到提醒，但计数保存失败")
+        }
+
+        MuyuConnectionRepository.recordReceivedTap(
+            receivedAtMillis = receivedAtMillis,
+            enqueueForForegroundUi = appInForeground
+        )
+
+        if (appInForeground) {
+            Log.d(TAG, "foreground tap received, queued for in-app feedback")
+            return
+        }
+
+        val notificationEnabled = try {
+            localDataStore.notificationEnabled.first()
+        } catch (error: Exception) {
+            Log.e(TAG, "failed to read notification preference", error)
+            false
+        }
+
+        if (notificationEnabled) {
             Log.d(TAG, "background tap received, sending notification")
             NotificationHelper.sendMeritReminderNotification(applicationContext)
         } else {
-            Log.d(TAG, "tap received without system notification foreground=$appInForeground")
+            Log.d(TAG, "background tap received while notification preference is disabled")
         }
     }
 
