@@ -148,17 +148,26 @@ function expectNoTap(socket, timeoutMs = 500) {
     });
 }
 
+function sendJson(socket, message) {
+    return new Promise((resolve, reject) => {
+        if (socket.readyState !== WebSocket.OPEN) {
+            reject(new Error(`${socket.clientName} 当前不可发送`));
+            return;
+        }
+        socket.send(JSON.stringify(message), (err) => {
+            if (err) reject(err); else resolve();
+        });
+    });
+}
+
 function sendTap(socket, room, overrides = {}) {
-    const message = {
+    return sendJson(socket, {
         type: 'tap',
         pairId: room,
         deviceId: socket.deviceId,
         timestamp: Date.now(),
         ...overrides
-    };
-    if (!socket.send(JSON.stringify(message))) {
-        throw new Error(`${socket.clientName} send() 返回 false`);
-    }
+    });
 }
 
 async function run() {
@@ -177,7 +186,7 @@ async function run() {
         const receiveAtB = waitForTap(clientB, clientA.deviceId);
         const noEchoAtA = expectNoTap(clientA);
         const noCrossRoomAtC = expectNoTap(clientC);
-        sendTap(clientA, roomA);
+        await sendTap(clientA, roomA);
         const messageAtB = await receiveAtB;
         await Promise.all([noEchoAtA, noCrossRoomAtC]);
         if (messageAtB.pairId !== roomA) throw new Error('转发后的 pairId 不匹配');
@@ -185,7 +194,7 @@ async function run() {
         console.log('[2/6] A→B 转发成功，发送方无回显，不同房间无串消息');
 
         const receiveAtA = waitForTap(clientA, clientB.deviceId);
-        sendTap(clientB, roomA);
+        await sendTap(clientB, roomA);
         await receiveAtA;
         passed++;
         console.log('[3/6] B→A 反向转发成功');
@@ -195,18 +204,18 @@ async function run() {
         console.log('[4/6] 同一房间第三个连接被 4002 拒绝');
 
         const noInvalidTapAtB = expectNoTap(clientB);
-        sendTap(clientA, roomA, { pairId: `${roomA}-wrong` });
+        await sendTap(clientA, roomA, { pairId: `${roomA}-wrong` });
         await noInvalidTapAtB;
         passed++;
         console.log('[5/6] pairId 不匹配的 tap 未被转发');
 
         const noUnknownMessageAtB = expectNoTap(clientB);
-        clientA.send(JSON.stringify({ type: 'unknown' }));
+        await sendJson(clientA, { type: 'unknown' });
         await noUnknownMessageAtB;
         passed++;
         console.log('[6/6] 未知消息类型未被转发');
 
-        console.log(`[auto-test] 静态定义的回归场景通过数=${passed}/6`);
+        console.log(`[auto-test] 回归场景通过数=${passed}/6`);
     } finally {
         clients.forEach((socket) => {
             try {
