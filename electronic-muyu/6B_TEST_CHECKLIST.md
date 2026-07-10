@@ -8,6 +8,7 @@
 
 - 先验证本地基线，再部署公网。
 - 6B 初次联调不得设置 `RELAY_TOKEN`。
+- 不得把 token、session、auth、api_key 等凭据写入 Android 服务器 URL。
 - 公网 `ws://` 只用于短期测试，完成后立即关闭端口。
 - Android 代码修改后必须重新编译和安装 APK。
 - 没有两台真实设备结果时，不得填写“真机通过”。
@@ -21,6 +22,8 @@
 | 测试 commit | 待填写 |
 | Android versionName | `0.6.0` |
 | Android versionCode | `1` |
+| compileSdk / targetSdk | `36 / 36` |
+| AGP / Gradle | `8.10.1 / 8.11.1` |
 | Node 版本 | 待填写 |
 | npm 版本 | 待填写 |
 | 设备 A 型号 / Android / ROM | 待填写 |
@@ -33,7 +36,11 @@
 - [ ] `git status --short` 已记录。
 - [ ] 确认只有 `MuyuForegroundService` 实例化 `WebSocketClient`。
 - [ ] Manifest 权限仍只有预期 5 项。
+- [ ] Manifest 包含 `FOREGROUND_SERVICE_REMOTE_MESSAGING`。
+- [ ] Manifest 不再包含 `FOREGROUND_SERVICE_DATA_SYNC`。
+- [ ] Service 类型为 `remoteMessaging`。
 - [ ] `applicationId` 仍为 `app.electronicmuyu.android`。
+- [ ] AGP 为 `8.10.1`，Gradle Wrapper 为 `8.11.1`。
 - [ ] Android 执行 `clean assembleDebug` 成功。
 - [ ] 输出中出现 `BUILD SUCCESSFUL`。
 - [ ] APK 路径存在：`app/build/outputs/apk/debug/app-debug.apk`。
@@ -72,6 +79,8 @@ npm.cmd run send
 - [ ] relay 总容量拒绝使用 4003。
 - [ ] 超过频率限制后使用 4008。
 - [ ] 异常 JSON 不导致 server 退出。
+- [ ] 二进制消息被拒绝。
+- [ ] 心跳能清理断网后失活连接。
 - [ ] 日志不显示完整 roomId、deviceId、客户端 IP 或 token。
 - [ ] Ctrl+C 后 server 能正常退出，不残留 8443 端口。
 
@@ -87,15 +96,20 @@ npm.cmd run send
 - [ ] App 刚启动立即点击不会把历史计数覆盖为 1。
 - [ ] 快速连续点击时本机功德数不丢失。
 - [ ] 第一次点击能正常播放声音。
-- [ ] 声音开关有效。
-- [ ] 震动开关有效。
-- [ ] 清空计数同时清空本机功德和收到提醒次数。
+- [ ] 声音开关有效，保存失败时 UI 不错误切换。
+- [ ] 震动开关有效，保存失败时 UI 不错误切换。
+- [ ] 清空计数同时清空本机功德、收到提醒次数和待显示提醒。
 - [ ] deviceId 重启后保持一致。
 - [ ] 设置页只显示 deviceId 前 8 位。
 - [ ] 无效 serverUrl 不显示“配置已保存”。
+- [ ] 配置成功提示只在 DataStore 事务完成后出现。
+- [ ] URL 与 roomId 作为同一事务保存，不出现半保存状态。
 - [ ] 超过 64 字符的 roomId 被 UI 拒绝。
-- [ ] 配置包含特殊字符时 room 参数被正确编码。
-- [ ] serverUrl 已有 query 时不会生成第二个 `?`。
+- [ ] 超过 2048 字符的 serverUrl 被拒绝。
+- [ ] URL 中用户名、密码和 fragment 被拒绝。
+- [ ] URL 中 token/session/auth/api_key 等敏感 query 不会保存。
+- [ ] 配置包含普通特殊字符时 room 参数被正确编码。
+- [ ] serverUrl 已有非敏感 query 时不会生成第二个 `?`。
 - [ ] 用户主动断开后不显示“自动重连中”。
 - [ ] 打开系统通知设置并返回后，权限和渠道状态会刷新。
 
@@ -112,6 +126,8 @@ npm.cmd run send
 - [ ] A 点击后 B 收到提醒次数 +1。
 - [ ] B 收到远端 tap 时本机功德不增加。
 - [ ] 前台收到 tap：App 内提示、声音、震动正常，不弹普通系统通知。
+- [ ] Activity 重建窗口收到前台 tap 后，10 秒内仍能显示一次且不重复播放。
+- [ ] 超过 10 秒的旧前台 UI 事件不会重新播放。
 - [ ] 后台收到 tap：普通系统通知正常。
 - [ ] 锁屏收到 tap：普通系统通知正常。
 - [ ] 点击普通通知返回 App。
@@ -177,14 +193,24 @@ npm.cmd run send
 
 - [ ] 息屏 5 分钟后仍能接收。
 - [ ] 息屏 30 分钟后结果已记录。
+- [ ] 连续运行超过 6 小时的结果已记录。
+- [ ] Android 15/16 上未出现 dataSync 配额超时，因为 Service 已使用 `remoteMessaging`。
 - [ ] 省电模式结果已记录。
 - [ ] 通知权限关闭时 App 状态提示正确。
 - [ ] 功德提醒渠道关闭时 App 状态提示正确。
 - [ ] App 被系统回收后的实际行为已记录。
 - [ ] 用户强制停止后明确不保证接收。
-- [ ] Foreground Service 超时后的清理结果已记录。
+- [ ] 意外 Service timeout 回调后的清理结果已记录。
 
-## 10. 最终结论模板
+## 10. 发布与 Play Console 边界
+
+- [ ] 正式发布前已切换到 `wss://`。
+- [ ] 正式发布前已关闭 `usesCleartextTraffic`。
+- [ ] 已在 Play Console 声明 `remoteMessaging` 前台服务类型及使用场景。
+- [ ] 已确认商店审核材料与 App 实际行为一致。
+- [ ] Release 构建、混淆、签名和安装已验证。
+
+## 11. 最终结论模板
 
 ```text
 测试 commit：
@@ -195,6 +221,7 @@ relay 本地回归：通过 / 失败
 后台通知：通过 / 失败
 锁屏通知：通过 / 失败
 重连：通过 / 失败
+长时间 remoteMessaging Service：通过 / 失败
 仍存在的问题：
 是否允许进入 6C WSS：是 / 否
 ```
