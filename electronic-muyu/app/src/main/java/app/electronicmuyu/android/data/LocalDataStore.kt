@@ -114,15 +114,21 @@ class LocalDataStore(private val context: Context) {
         }
     }
 
-    suspend fun setWsUrl(url: String) {
+    /**
+     * 服务器地址和房间 ID 必须作为同一份配置原子写入，避免进程在两次 edit 之间
+     * 被终止时留下 URL 与 room 不匹配的半保存状态。
+     */
+    suspend fun setConnectionConfig(url: String, roomId: String) {
         context.dataStore.edit { prefs ->
             prefs[KEY_WS_URL] = url
+            prefs[KEY_ROOM_ID] = roomId
         }
     }
 
-    suspend fun setRoomId(roomId: String) {
+    suspend fun resetConnectionConfig() {
         context.dataStore.edit { prefs ->
-            prefs[KEY_ROOM_ID] = roomId
+            prefs.remove(KEY_WS_URL)
+            prefs.remove(KEY_ROOM_ID)
         }
     }
 
