@@ -17,6 +17,7 @@ import app.electronicmuyu.android.vibration.VibrationManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 import okhttp3.Request
 import java.util.UUID
@@ -123,20 +124,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         viewModelScope.launch {
-            MuyuConnectionRepository.pendingReceivedTapUiEvents.collect { events ->
-                if (events.isEmpty()) return@collect
+            combine(
+                MuyuConnectionRepository.pendingReceivedTapUiEvents,
+                MuyuConnectionRepository.appForeground
+            ) { events, isForeground ->
+                events to isForeground
+            }.collect { (events, isForeground) ->
+                if (events.isEmpty() || !isForeground) return@collect
 
                 val eventIds = events.map { it.id }
                 try {
                     val now = System.currentTimeMillis()
-                    if (MuyuConnectionRepository.appForeground.value) {
-                        events.forEach { event ->
-                            val age = now - event.receivedAtMillis
-                            if (age in 0L..MAX_UI_EVENT_AGE_MS) {
-                                _lastReceivedTime.value = event.receivedAtMillis
-                                _lastReceivedEvent.value = event.id
-                                playSoundAndVibrate()
-                            }
+                    events.forEach { event ->
+                        val age = now - event.receivedAtMillis
+                        if (age in 0L..MAX_UI_EVENT_AGE_MS) {
+                            _lastReceivedTime.value = event.receivedAtMillis
+                            _lastReceivedEvent.value = event.id
+                            playSoundAndVibrate()
                         }
                     }
                 } finally {
