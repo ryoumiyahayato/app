@@ -76,31 +76,6 @@ function waitForClose(socket, code, timeoutMs = 5_000) {
   });
 }
 
-function waitForCloseOrNetworkError(socket, code, timeoutMs = 12_000) {
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timer);
-      socket.removeEventListener("close", onClose);
-      socket.removeEventListener("error", onError);
-    };
-    const onClose = (event) => {
-      cleanup();
-      if (event.code === code) resolve({ kind: "close", reason: event.reason });
-      else reject(new Error(`close=${event.code}, expected=${code}`));
-    };
-    const onError = () => {
-      cleanup();
-      resolve({ kind: "network_error", reason: "" });
-    };
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error("WebSocket close/error timeout"));
-    }, timeoutMs);
-    socket.addEventListener("close", onClose, { once: true });
-    socket.addEventListener("error", onError, { once: true });
-  });
-}
-
 async function waitForOpen(socket, timeoutMs = 5_000) {
   await new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -240,19 +215,22 @@ try {
   helloRequired.send(JSON.stringify({ type: "tap" }));
   await helloRequiredClosed;
 
-  const helloTimeoutRoom = `${room}-hello-timeout`;
-  const helloTimeout = new WebSocket(
-    `${baseWebSocketUrl}/?room=${encodeURIComponent(helloTimeoutRoom)}`
-  );
-  sockets.push(helloTimeout);
-  const timeoutStartedAt = Date.now();
-  const helloTimeoutFinished = waitForCloseOrNetworkError(helloTimeout, 4004);
-  await waitForOpen(helloTimeout);
-  const helloTimeoutResult = await helloTimeoutFinished;
-  assert.ok(Date.now() - timeoutStartedAt >= 4_500, "hello timeout fired too early");
-  if (helloTimeoutResult.kind === "close") {
-    assert.equal(helloTimeoutResult.reason, "hello timeout");
+  const saturatedRoom = `${room}-stale-pending`;
+  const stalePendingSockets = [];
+  for (let index = 0; index < 6; index += 1) {
+    const pending = new WebSocket(
+      `${baseWebSocketUrl}/?room=${encodeURIComponent(saturatedRoom)}`
+    );
+    pending.addEventListener("error", () => { /* Wrangler may report alarm close as error. */ });
+    sockets.push(pending);
+    stalePendingSockets.push(pending);
+    await waitForOpen(pending);
   }
+  await sleep(6_000);
+  const afterPendingExpiry = await connect(saturatedRoom, "device-after-timeout");
+  sockets.push(afterPendingExpiry.socket);
+  assert.equal(afterPendingExpiry.state.peerOnline, false);
+  assert.equal(afterPendingExpiry.state.connections, 1);
 
   const binary = await connect(`${room}-binary`, "device-binary");
   sockets.push(binary.socket);
