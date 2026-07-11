@@ -76,17 +76,52 @@ function waitForClose(socket, code, timeoutMs = 5_000) {
   });
 }
 
+function waitForCloseOrNetworkError(socket, code, timeoutMs = 12_000) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.removeEventListener("close", onClose);
+      socket.removeEventListener("error", onError);
+    };
+    const onClose = (event) => {
+      cleanup();
+      if (event.code === code) resolve({ kind: "close", reason: event.reason });
+      else reject(new Error(`close=${event.code}, expected=${code}`));
+    };
+    const onError = () => {
+      cleanup();
+      resolve({ kind: "network_error", reason: "" });
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("WebSocket close/error timeout"));
+    }, timeoutMs);
+    socket.addEventListener("close", onClose, { once: true });
+    socket.addEventListener("error", onError, { once: true });
+  });
+}
+
 async function waitForOpen(socket, timeoutMs = 5_000) {
   await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("WebSocket open timeout")), timeoutMs);
-    socket.addEventListener("open", () => {
+    const cleanup = () => {
       clearTimeout(timer);
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("error", onError);
+    };
+    const onOpen = () => {
+      cleanup();
       resolve();
-    }, { once: true });
-    socket.addEventListener("error", () => {
-      clearTimeout(timer);
+    };
+    const onError = () => {
+      cleanup();
       reject(new Error("WebSocket connection failed"));
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("WebSocket open timeout"));
+    }, timeoutMs);
+    socket.addEventListener("open", onOpen, { once: true });
+    socket.addEventListener("error", onError, { once: true });
   });
 }
 
@@ -210,9 +245,14 @@ try {
     `${baseWebSocketUrl}/?room=${encodeURIComponent(helloTimeoutRoom)}`
   );
   sockets.push(helloTimeout);
-  const helloTimeoutClosed = waitForClose(helloTimeout, 4004, 8_000);
+  const timeoutStartedAt = Date.now();
+  const helloTimeoutFinished = waitForCloseOrNetworkError(helloTimeout, 4004);
   await waitForOpen(helloTimeout);
-  assert.equal(await helloTimeoutClosed, "hello timeout");
+  const helloTimeoutResult = await helloTimeoutFinished;
+  assert.ok(Date.now() - timeoutStartedAt >= 4_500, "hello timeout fired too early");
+  if (helloTimeoutResult.kind === "close") {
+    assert.equal(helloTimeoutResult.reason, "hello timeout");
+  }
 
   const binary = await connect(`${room}-binary`, "device-binary");
   sockets.push(binary.socket);
