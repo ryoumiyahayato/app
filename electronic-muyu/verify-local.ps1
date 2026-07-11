@@ -272,8 +272,17 @@ function Assert-ReleaseUnsigned {
         throw 'apksigner.bat was not found under Android SDK build-tools'
     }
 
-    & $apksigner.FullName verify $releaseApk *> $null
-    $signatureExitCode = $LASTEXITCODE
+    # An unsigned APK is the expected input here. Windows PowerShell promotes apksigner's
+    # expected stderr to a terminating NativeCommandError while ErrorActionPreference=Stop,
+    # before the script can inspect LASTEXITCODE. Temporarily allow the native exit code through.
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $apksigner.FullName verify $releaseApk *> $null
+        $signatureExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($signatureExitCode -eq 0) {
         throw 'release APK is unexpectedly signed; this project must not silently use a local key'
     }
