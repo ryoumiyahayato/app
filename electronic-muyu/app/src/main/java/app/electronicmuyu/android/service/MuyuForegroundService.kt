@@ -88,6 +88,7 @@ class MuyuForegroundService : Service() {
                 if (foregroundStarted) {
                     updateForegroundNotification(wsClient.connectionState.value)
                 }
+                if (isOnline) schedulePendingTapFlush()
             }
         }
         serviceScope.launch {
@@ -215,7 +216,11 @@ class MuyuForegroundService : Service() {
     }
 
     private suspend fun sendEncryptedTap(timestamp: Long): Boolean {
-        if (MuyuConnectionRepository.connectionState.value != ConnectionState.CONNECTED) return false
+        if (!shouldFlushPendingTaps(
+                MuyuConnectionRepository.connectionState.value,
+                MuyuConnectionRepository.partnerOnline.value
+            )
+        ) return false
         val stored = localDataStore.storedPair.first() ?: return false
         val key = sendKey ?: return false
         return try {
@@ -238,7 +243,11 @@ class MuyuForegroundService : Service() {
         val result = pendingTaps.offer(timestamp, SystemClock.elapsedRealtime())
         reportDroppedPendingTaps(result.expiredCount, result.overflowCount)
         schedulePendingTapExpiryCheck()
-        if (MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED) {
+        if (shouldFlushPendingTaps(
+                MuyuConnectionRepository.connectionState.value,
+                MuyuConnectionRepository.partnerOnline.value
+            )
+        ) {
             schedulePendingTapFlush()
         }
     }
@@ -247,7 +256,11 @@ class MuyuForegroundService : Service() {
         if (pendingTapFlushJob?.isActive == true || pendingTaps.isEmpty()) return
         pendingTapFlushJob = serviceScope.launch {
             try {
-                while (MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED) {
+                while (shouldFlushPendingTaps(
+                        MuyuConnectionRepository.connectionState.value,
+                        MuyuConnectionRepository.partnerOnline.value
+                    )
+                ) {
                     val next = pendingTaps.poll(SystemClock.elapsedRealtime())
                     reportDroppedPendingTaps(next.expiredCount, 0)
                     val tap = next.tap ?: break
