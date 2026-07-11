@@ -6,6 +6,7 @@ on:
       - 'electronic-muyu/**'
       - '.github/agent-payload/**'
       - '.github/agent-apply.log'
+      - '.github/android-verify.log'
       - '.github/workflows/apply-second-audit-fixes.yml'
       - '.github/workflows/verify-electronic-muyu.yml'
 
@@ -75,7 +76,6 @@ jobs:
                       for actual, expected in zip(candidate, old_lines)
                   ):
                       continue
-
                   first_expected = next((line for line in old_lines if line.strip()), '')
                   first_actual = next((line for line in candidate if line.strip()), '')
                   expected_indent = len(first_expected) - len(first_expected.lstrip(' \\t'))
@@ -85,8 +85,7 @@ jobs:
                   for line in new.splitlines(keepends=True):
                       if not line.strip():
                           adjusted.append(line)
-                          continue
-                      if delta >= 0:
+                      elif delta >= 0:
                           adjusted.append((' ' * delta) + line)
                       else:
                           leading = len(line) - len(line.lstrip(' \\t'))
@@ -94,7 +93,6 @@ jobs:
                   text_lines[index:index + len(old_lines)] = [''.join(adjusted)]
                   path.write_text(''.join(text_lines), encoding='utf-8')
                   return
-
               raise RuntimeError(f'{relative}: expected a content match, found none')
           '''
           if old_helper not in source:
@@ -135,7 +133,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf .github/agent-payload
-          rm -f .github/agent-apply.log
+          rm -f .github/agent-apply.log .github/android-verify.log
           rm -f .github/workflows/apply-second-audit-fixes.yml
           git fetch origin main
           git checkout origin/main -- .github/workflows/verify-electronic-muyu.yml
@@ -182,6 +180,18 @@ jobs:
           npm ci
           npm run verify
 
+      - name: Commit repaired source to PR branch
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: address second audit findings'
+          git push origin HEAD:${{ github.head_ref }}
+
       - name: Set up Java
         if: steps.apply.outcome == 'success'
         uses: actions/setup-java@v4
@@ -199,22 +209,33 @@ jobs:
         run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
 
       - name: Verify Android source
+        id: android
         if: steps.apply.outcome == 'success'
+        continue-on-error: true
         shell: bash
         working-directory: electronic-muyu
         run: |
-          set -euo pipefail
+          set +e
           chmod +x gradlew
-          ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+          ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug > /tmp/android-verify.log 2>&1
+          status=$?
+          echo "exit_code=$status" >> /tmp/android-verify.log
+          tail -n 300 /tmp/android-verify.log
+          exit "$status"
 
-      - name: Commit repaired source to PR branch
-        if: steps.apply.outcome == 'success'
+      - name: Record Android diagnostics
+        if: steps.android.outcome == 'failure'
         shell: bash
         run: |
           set -euo pipefail
+          cp /tmp/android-verify.log .github/android-verify.log
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          git commit -m 'fix: address second audit findings'
+          git add .github/android-verify.log
+          git commit -m 'chore: record Android verification failure'
           git push origin HEAD:${{ github.head_ref }}
+
+      - name: Stop after Android failure
+        if: steps.android.outcome == 'failure'
+        shell: bash
+        run: exit 1
