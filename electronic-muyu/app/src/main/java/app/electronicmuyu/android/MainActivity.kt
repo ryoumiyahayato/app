@@ -1,8 +1,12 @@
 package app.electronicmuyu.android
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -50,7 +54,9 @@ class MainActivity : ComponentActivity() {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         notificationPermissionResult = callback
                         notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    } else callback(true)
+                    } else {
+                        callback(true)
+                    }
                 }
             }
         }
@@ -59,10 +65,12 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         MuyuConnectionRepository.setUiForeground(true)
+        MuyuConnectionRepository.setAppForeground(true)
     }
 
     override fun onStop() {
         MuyuConnectionRepository.setUiForeground(false)
+        MuyuConnectionRepository.setAppForeground(false)
         super.onStop()
     }
 }
@@ -77,23 +85,35 @@ fun MuyuApp(onRequestNotificationPermission: ((Boolean) -> Unit) -> Unit = {}) {
     val connectionState by viewModel.connectionState.collectAsState()
     val lastReceivedEvent by viewModel.lastReceivedEvent.collectAsState()
     val lastError by viewModel.lastError.collectAsState()
+    val partnerOnline by MuyuConnectionRepository.partnerOnline.collectAsState()
     val serviceRunning by viewModel.isServiceRunning.collectAsState()
     val soundEnabled by viewModel.soundEnabled.collectAsState()
     val vibrationEnabled by viewModel.vibrationEnabled.collectAsState()
     val notificationEnabled by viewModel.notificationEnabled.collectAsState()
+    val lastDisconnectReason by viewModel.lastDisconnectReason.collectAsState()
+    val lastDisconnectAtMillis by viewModel.lastDisconnectAtMillis.collectAsState()
+    val isAppInForeground by viewModel.isAppInForeground.collectAsState()
+    val isReconnecting by viewModel.isReconnecting.collectAsState()
+    val lastReconnectResult by viewModel.lastReconnectResult.collectAsState()
+    val foregroundNotificationText by viewModel.foregroundNotificationText.collectAsState()
     val pairing by viewModel.pairingUiState.collectAsState()
     val storedPair by viewModel.storedPair.collectAsState()
     val debugRelay by viewModel.debugRelayOverride.collectAsState()
     val navController = rememberNavController()
     var notificationPermission by remember { mutableStateOf(false) }
-
-    fun refreshNotificationPermission() {
-        notificationPermission = NotificationHelper.hasNotificationPermission(context)
+    var notificationDeliveryStatus by remember {
+        mutableStateOf(NotificationHelper.DeliveryStatus.PERMISSION_DENIED)
     }
-    LaunchedEffect(Unit) { refreshNotificationPermission() }
+
+    fun refreshNotificationState() {
+        notificationPermission = NotificationHelper.hasNotificationPermission(context)
+        notificationDeliveryStatus = NotificationHelper.getDeliveryStatus(context)
+    }
+
+    LaunchedEffect(Unit) { refreshNotificationState() }
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) refreshNotificationPermission()
+            if (event == Lifecycle.Event.ON_RESUME) refreshNotificationState()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -108,10 +128,15 @@ fun MuyuApp(onRequestNotificationPermission: ((Boolean) -> Unit) -> Unit = {}) {
                 lastReceivedEvent = lastReceivedEvent,
                 lastError = lastError,
                 wsEnabled = serviceRunning,
-                lastDisconnectReason = viewModel.lastDisconnectReason.collectAsState().value,
+                lastDisconnectReason = lastDisconnectReason,
+                partnerOnline = partnerOnline,
                 onWoodfishTap = viewModel::onTap,
                 onConnect = {
-                    if (storedPair == null) navController.navigate("settings") else viewModel.startConnection()
+                    if (storedPair == null) {
+                        navController.navigate("settings")
+                    } else {
+                        viewModel.startConnection()
+                    }
                 },
                 onDisconnect = viewModel::stopConnection,
                 onNavigateToSettings = { navController.navigate("settings") },
@@ -124,21 +149,54 @@ fun MuyuApp(onRequestNotificationPermission: ((Boolean) -> Unit) -> Unit = {}) {
                 vibrationEnabled = vibrationEnabled,
                 notificationEnabled = notificationEnabled,
                 notificationPermissionGranted = notificationPermission,
+                notificationDeliveryStatus = notificationDeliveryStatus.label,
                 connectionState = connectionState,
+                partnerOnline = partnerOnline,
                 pairing = pairing,
                 storedPair = storedPair,
                 allowRelayOverride = viewModel.allowRelayOverride,
                 debugRelayOverride = debugRelay,
                 lastError = lastError,
+                lastDisconnectReason = lastDisconnectReason.label,
+                lastDisconnectAtMillis = lastDisconnectAtMillis,
+                isAppInForeground = isAppInForeground,
+                isReconnecting = isReconnecting,
+                lastReconnectResult = lastReconnectResult,
+                isServiceRunning = serviceRunning,
+                foregroundNotificationText = foregroundNotificationText,
                 onSoundToggle = viewModel::setSoundEnabled,
                 onVibrationToggle = viewModel::setVibrationEnabled,
                 onNotificationToggle = { enabled ->
                     if (!enabled || NotificationHelper.hasNotificationPermission(context)) {
                         viewModel.setNotificationEnabled(enabled)
-                        refreshNotificationPermission()
-                    } else onRequestNotificationPermission { granted ->
-                        viewModel.setNotificationEnabled(granted)
-                        refreshNotificationPermission()
+                        refreshNotificationState()
+                    } else {
+                        onRequestNotificationPermission { granted ->
+                            viewModel.setNotificationEnabled(granted)
+                            refreshNotificationState()
+                        }
+                    }
+                },
+                onOpenNotificationSettings = {
+                    val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.fromParts("package", context.packageName, null)
+                    }
+                    context.startActivity(intent)
+                },
+                onSendTestNotification = {
+                    fun sendTest() {
+                        NotificationHelper.createNotificationChannel(context)
+                        if (!NotificationHelper.sendMeritReminderNotification(context)) {
+                            Log.d("ElectronicMuyu", "test notification was not deliverable")
+                        }
+                        refreshNotificationState()
+                    }
+                    if (NotificationHelper.hasNotificationPermission(context)) {
+                        sendTest()
+                    } else {
+                        onRequestNotificationPermission { granted ->
+                            if (granted) sendTest() else refreshNotificationState()
+                        }
                     }
                 },
                 onCreateInvite = viewModel::createInvite,
