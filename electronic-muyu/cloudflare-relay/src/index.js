@@ -1,215 +1,171 @@
-import { DurableObject } from "cloudflare:workers";
+import { errorResponse, jsonResponse, readStrictJson } from "./http.js";
+import { routeLegacy } from "./legacy.js";
 import {
-  MAX_MESSAGE_BYTES,
-  canonicalTap,
-  constantTimeEqual,
-  isValidRoomId,
-  isValidTap,
-  updateRateWindow
+  isOpaqueId,
+  isValidCancelInvite,
+  isValidConfirmInvite,
+  isValidCreateInvite,
+  isValidJoinInvite,
+  isValidRevokeDevice,
+  shortHash
 } from "./protocol.js";
 
-const HEALTH_BODY = JSON.stringify({
+export { InvitationSession } from "./invitation.js";
+export { PairRoom } from "./legacy.js";
+export { RequestRateLimiter } from "./rate-limiter.js";
+export { SecurePair } from "./secure-pair.js";
+
+const HEALTH_BODY = Object.freeze({
   ok: true,
   service: "electronic-muyu-relay",
+  protocolVersion: 1,
   runtime: "cloudflare-workers-durable-objects"
 });
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-      "referrer-policy": "no-referrer"
-    }
+const REQUEST_LIMITS = Object.freeze({
+  create: { limit: 10, windowMs: 60_000 },
+  join: { limit: 20, windowMs: 60_000 },
+  confirm: { limit: 120, windowMs: 60_000 },
+  cancel: { limit: 30, windowMs: 60_000 },
+  revoke: { limit: 30, windowMs: 60_000 }
+});
+
+async function networkHash(request) {
+  const address = request.headers.get("cf-connecting-ip") || "local-development";
+  return shortHash(address);
+}
+
+async function enforceRequestLimit(env, operation, hash) {
+  const policy = REQUEST_LIMITS[operation];
+  const id = env.RATE_LIMITS.idFromName(`${operation}:${hash}`);
+  const response = await env.RATE_LIMITS.get(id).fetch("https://internal/consume", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ now: Date.now(), ...policy })
+  });
+  if (!response.ok) return false;
+  return (await response.json()).allowed === true;
+}
+
+async function validatedBody(request, validator) {
+  const parsed = await readStrictJson(request);
+  if (parsed.response) return parsed;
+  if (!validator(parsed.value)) return { response: errorResponse(400, "invalid_request") };
+  return parsed;
+}
+
+async function forwardInvitation(env, inviteId, action, body) {
+  const object = env.INVITATIONS.get(env.INVITATIONS.idFromName(inviteId));
+  return object.fetch(`https://internal/${action}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...body, now: Date.now() })
   });
 }
 
-function rejectedWebSocket(code, reason) {
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  server.accept();
-  server.close(code, reason);
-  return new Response(null, { status: 101, webSocket: client });
+async function handleCreate(request, env, hash) {
+  if (request.method !== "POST") return errorResponse(405, "method_not_allowed");
+  if (!await enforceRequestLimit(env, "create", hash)) return errorResponse(429, "rate_limited");
+  const parsed = await validatedBody(request, isValidCreateInvite);
+  if (parsed.response) return parsed.response;
+  return forwardInvitation(env, parsed.value.inviteId, "create", parsed.value);
 }
 
-function safeClose(socket, code, reason) {
-  try {
-    socket.close(code, reason);
-  } catch {
-    // The peer may already have closed. No retry or logging is needed here.
+async function handleInviteAction(request, env, hash, inviteId, action) {
+  if (request.method !== "POST") return errorResponse(405, "method_not_allowed");
+  if (!isOpaqueId(inviteId)) return errorResponse(404, "invite_not_found");
+  const operation = action === "join" ? "join" : action === "cancel" ? "cancel" : "confirm";
+  if (!await enforceRequestLimit(env, operation, hash)) return errorResponse(429, "rate_limited");
+  const validator = action === "join"
+    ? isValidJoinInvite
+    : action === "cancel"
+      ? isValidCancelInvite
+      : isValidConfirmInvite;
+  const parsed = await validatedBody(request, validator);
+  if (parsed.response) return parsed.response;
+  return forwardInvitation(env, inviteId, action, parsed.value);
+}
+
+async function handleRevoke(request, env, hash, pairId, deviceId) {
+  if (request.method !== "DELETE") return errorResponse(405, "method_not_allowed");
+  if (!isOpaqueId(pairId) || !isOpaqueId(deviceId)) return errorResponse(404, "pair_not_found");
+  if (!await enforceRequestLimit(env, "revoke", hash)) return errorResponse(429, "rate_limited");
+  const parsed = await validatedBody(request, isValidRevokeDevice);
+  if (parsed.response) return parsed.response;
+  const object = env.PAIRS.get(env.PAIRS.idFromName(pairId));
+  return object.fetch("https://internal/revoke", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      pairId,
+      deviceId,
+      token: parsed.value.token,
+      now: Date.now()
+    })
+  });
+}
+
+async function handleSocket(request, env, url, hash) {
+  const isUpgrade = request.method === "GET"
+    && request.headers.get("upgrade")?.toLowerCase() === "websocket";
+  const queryKeys = [...url.searchParams.keys()];
+  const pairId = url.searchParams.get("pair");
+  if (!isUpgrade
+    || queryKeys.length !== 1
+    || queryKeys[0] !== "pair"
+    || url.searchParams.getAll("pair").length !== 1
+    || !isOpaqueId(pairId)) {
+    return errorResponse(400, "invalid_socket_request");
   }
-}
 
-async function shortHash(value) {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(value)
-  );
-  return Array.from(new Uint8Array(digest).slice(0, 4))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+  const object = env.PAIRS.get(env.PAIRS.idFromName(pairId));
+  const headers = new Headers(request.headers);
+  headers.set("x-electronic-muyu-network", hash);
+  headers.delete("cf-connecting-ip");
+  const internalRequest = new Request(`https://internal/socket?pair=${encodeURIComponent(pairId)}`, {
+    method: "GET",
+    headers
+  });
+  return object.fetch(internalRequest);
 }
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
+      const hash = await networkHash(request);
 
-    if (request.method === "GET" && url.pathname === "/health") {
-      return new Response(HEALTH_BODY, {
-        status: 200,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": "no-store",
-          "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer"
-        }
-      });
-    }
-
-    if (url.pathname !== "/" && url.pathname !== "/ws") {
-      return jsonResponse({ ok: false, error: "not_found" }, 404);
-    }
-
-    const isWebSocket = request.method === "GET"
-      && request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-    if (!isWebSocket) {
-      return jsonResponse({ ok: false, error: "websocket_upgrade_required" }, 426);
-    }
-
-    const roomId = url.searchParams.get("room");
-    if (!isValidRoomId(roomId)) {
-      return rejectedWebSocket(4000, "valid room parameter required");
-    }
-
-    const requiredToken = typeof env.RELAY_TOKEN === "string" ? env.RELAY_TOKEN : "";
-    if (requiredToken.length > 0) {
-      const suppliedToken = url.searchParams.get("token") || "";
-      if (!constantTimeEqual(suppliedToken, requiredToken)) {
-        return rejectedWebSocket(4001, "invalid token");
+      if (url.pathname === "/health") {
+        return request.method === "GET"
+          ? jsonResponse(HEALTH_BODY)
+          : errorResponse(405, "method_not_allowed");
       }
-    }
+      if (url.pathname === "/v1/invites") return handleCreate(request, env, hash);
 
-    const roomObjectId = env.ROOMS.idFromName(roomId);
-    const roomObject = env.ROOMS.get(roomObjectId);
-    return roomObject.fetch(request);
+      const inviteMatch = url.pathname.match(
+        /^\/v1\/invites\/([A-Za-z0-9_-]+)\/(join|confirm|cancel)$/u
+      );
+      if (inviteMatch) {
+        return handleInviteAction(request, env, hash, inviteMatch[1], inviteMatch[2]);
+      }
+
+      const revokeMatch = url.pathname.match(
+        /^\/v1\/pairs\/([A-Za-z0-9_-]+)\/devices\/([A-Za-z0-9_-]+)$/u
+      );
+      if (revokeMatch) {
+        return handleRevoke(request, env, hash, revokeMatch[1], revokeMatch[2]);
+      }
+
+      if (url.pathname === "/v1/socket") return handleSocket(request, env, url, hash);
+
+      const legacyRequested = url.pathname === "/" || url.pathname === "/ws";
+      if (legacyRequested && String(env.ALLOW_LEGACY).toLowerCase() === "true") {
+        return routeLegacy(request, env, url);
+      }
+      return errorResponse(404, "not_found");
+    } catch (error) {
+      console.error(`[relay] request_failed type=${error?.name || "Error"}`);
+      return errorResponse(500, "internal_error");
+    }
   }
 };
-
-export class PairRoom extends DurableObject {
-  async fetch(request) {
-    const url = new URL(request.url);
-    const roomId = url.searchParams.get("room");
-    const isWebSocket = request.method === "GET"
-      && request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-
-    if (!isWebSocket || !isValidRoomId(roomId)) {
-      return jsonResponse({ ok: false, error: "invalid_room_request" }, 400);
-    }
-
-    const activeSockets = this.ctx.getWebSockets().filter((socket) => socket.readyState === 1);
-    if (activeSockets.length >= 2) {
-      return rejectedWebSocket(4002, "room is full");
-    }
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    const now = Date.now();
-    const roomHash = await shortHash(roomId);
-
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({
-      roomId,
-      roomHash,
-      deviceId: null,
-      joinedAt: now,
-      windowStartedAt: now,
-      messagesInWindow: 0
-    });
-
-    try {
-      server.send(JSON.stringify({
-        type: "room_info",
-        room: roomId,
-        connections: activeSockets.length + 1,
-        timestamp: now
-      }));
-      console.log(`[relay] connected roomHash=${roomHash} connections=${activeSockets.length + 1}`);
-    } catch {
-      safeClose(server, 1011, "room_info send failed");
-    }
-
-    return new Response(null, { status: 101, webSocket: client });
-  }
-
-  async webSocketMessage(socket, message) {
-    const attachment = socket.deserializeAttachment();
-    if (!attachment || !isValidRoomId(attachment.roomId)) {
-      safeClose(socket, 1011, "missing connection state");
-      return;
-    }
-
-    if (typeof message !== "string") {
-      safeClose(socket, 1003, "text messages only");
-      return;
-    }
-
-    if (new TextEncoder().encode(message).byteLength > MAX_MESSAGE_BYTES) {
-      safeClose(socket, 1009, "message too large");
-      return;
-    }
-
-    const rateState = updateRateWindow(attachment, Date.now());
-    attachment.windowStartedAt = rateState.windowStartedAt;
-    attachment.messagesInWindow = rateState.messagesInWindow;
-    socket.serializeAttachment(attachment);
-
-    if (!rateState.allowed) {
-      console.log(`[relay] rate limited roomHash=${attachment.roomHash}`);
-      safeClose(socket, 4008, "rate limit exceeded");
-      return;
-    }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(message);
-    } catch {
-      return;
-    }
-
-    if (!isValidTap(parsed, attachment.roomId)) {
-      return;
-    }
-
-    if (attachment.deviceId === null) {
-      attachment.deviceId = parsed.deviceId;
-      socket.serializeAttachment(attachment);
-    } else if (attachment.deviceId !== parsed.deviceId) {
-      safeClose(socket, 4000, "deviceId changed");
-      return;
-    }
-
-    const payload = canonicalTap(parsed);
-    let forwarded = 0;
-    for (const peer of this.ctx.getWebSockets()) {
-      if (peer === socket || peer.readyState !== 1) continue;
-      try {
-        peer.send(payload);
-        forwarded += 1;
-      } catch {
-        safeClose(peer, 1011, "forward failed");
-      }
-    }
-
-    console.log(`[relay] forwarded=${forwarded} roomHash=${attachment.roomHash}`);
-  }
-
-  webSocketClose(_socket, code, _reason, wasClean) {
-    console.log(`[relay] disconnected code=${code} clean=${wasClean}`);
-  }
-
-  webSocketError(socket) {
-    safeClose(socket, 1011, "websocket error");
-  }
-}

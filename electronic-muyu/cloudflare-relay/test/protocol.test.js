@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   MAX_MESSAGES_PER_WINDOW,
   RATE_LIMIT_WINDOW_MS,
-  canonicalTap,
+  canonicalEncryptedTap,
   constantTimeEqual,
   isValidRoomId,
   isValidTap,
@@ -33,7 +33,7 @@ test("tap validation binds pairId and validates fields", () => {
 });
 
 test("canonical tap strips unknown fields", () => {
-  const encoded = canonicalTap({
+  const encoded = canonicalEncryptedTap({
     type: "tap",
     pairId: "room-a",
     deviceId: "device-a",
