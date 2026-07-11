@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - main
-      - fix/z-audit-issues-20260710
-      - feat/secure-qr-pairing-20260710
     paths:
       - "electronic-muyu/cloudflare-relay/**"
       - ".github/workflows/verify-cloudflare-relay.yml"
@@ -17,9 +15,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: cloudflare-relay-verify-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: electronic-muyu/cloudflare-relay
