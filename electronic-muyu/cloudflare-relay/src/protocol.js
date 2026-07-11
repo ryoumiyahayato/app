@@ -5,121 +5,33 @@ export const MAX_WEBSOCKET_MESSAGE_BYTES = 4096;
 export const AUTH_TIMEOUT_MS = 5_000;
 export const RATE_LIMIT_WINDOW_MS = 10_000;
 export const MAX_MESSAGES_PER_WINDOW = 60;
-export const MAX_PENDING_SOCKETS = 16;
+export const PROTOCOL_VERSION = 2;
 
 const BASE64URL_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const DEVICE_NAME_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 const textEncoder = new TextEncoder();
 
-export function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+export function isValidRoomId(value) {
+  return typeof value === "string" && value.length >= 1
+    && value.length <= MAX_ROOM_ID_LENGTH && !CONTROL_CHARACTERS.test(value);
 }
 
-export function hasExactKeys(value, expectedKeys) {
-  if (!isPlainObject(value)) return false;
-  const actual = Object.keys(value).sort();
-  const expected = [...expectedKeys].sort();
-  return actual.length === expected.length
-    && actual.every((key, index) => key === expected[index]);
+export function isValidDeviceId(value) {
+  return typeof value === "string" && value.length >= 1
+    && value.length <= MAX_DEVICE_ID_LENGTH && !CONTROL_CHARACTERS.test(value);
 }
 
-export function encodeBase64Url(bytes) {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/gu, "-").replace(/\//gu, "_").replace(/=+$/u, "");
+export function isValidHello(value, roomId) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && value.type === "hello" && value.pairId === roomId
+    && isValidDeviceId(value.deviceId) && value.protocolVersion === PROTOCOL_VERSION;
 }
 
-export function decodeBase64Url(value, expectedBytes) {
-  if (typeof value !== "string" || !BASE64URL_PATTERN.test(value)) return null;
-  try {
-    const padding = "=".repeat((4 - (value.length % 4)) % 4);
-    const binary = atob(value.replace(/-/gu, "+").replace(/_/gu, "/") + padding);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    if (expectedBytes !== undefined && bytes.byteLength !== expectedBytes) return null;
-    if (encodeBase64Url(bytes) !== value) return null;
-    return bytes;
-  } catch {
-    return null;
-  }
-}
-
-export function isOpaqueId(value) {
-  return decodeBase64Url(value, 16) !== null;
-}
-
-export function isSecret(value) {
-  return decodeBase64Url(value, 32) !== null;
-}
-
-export function isP256Spki(value) {
-  return decodeBase64Url(value, 91) !== null;
-}
-
-export function isDeviceName(value) {
-  return typeof value === "string"
-    && value.length >= 1
-    && value.length <= 64
-    && !DEVICE_NAME_CONTROL_CHARACTERS.test(value);
-}
-
-export function isSafeTimestamp(value) {
-  return Number.isSafeInteger(value) && value > 0;
-}
-
-export function isValidCreateInvite(value) {
-  return hasExactKeys(value, [
-    "version",
-    "inviteId",
-    "inviteSecretHash",
-    "inviterDeviceId",
-    "inviterDeviceName",
-    "inviterPublicKey"
-  ])
-    && value.version === PROTOCOL_VERSION
-    && isOpaqueId(value.inviteId)
-    && isSecret(value.inviteSecretHash)
-    && isOpaqueId(value.inviterDeviceId)
-    && isDeviceName(value.inviterDeviceName)
-    && isP256Spki(value.inviterPublicKey);
-}
-
-export function isValidJoinInvite(value) {
-  return hasExactKeys(value, [
-    "version",
-    "inviteSecret",
-    "joinerDeviceId",
-    "joinerDeviceName",
-    "joinerPublicKey"
-  ])
-    && value.version === PROTOCOL_VERSION
-    && isSecret(value.inviteSecret)
-    && isOpaqueId(value.joinerDeviceId)
-    && isDeviceName(value.joinerDeviceName)
-    && isP256Spki(value.joinerPublicKey);
-}
-
-export function isValidConfirmInvite(value) {
-  if (!isPlainObject(value) || value.version !== PROTOCOL_VERSION) return false;
-  if (!isOpaqueId(value.deviceId) || !isSecret(value.sessionToken)) return false;
-  if (!new Set(["status", "confirm", "reject"]).has(value.decision)) return false;
-
-  if (value.decision === "confirm") {
-    return hasExactKeys(value, [
-      "version",
-      "deviceId",
-      "sessionToken",
-      "decision",
-      "accessTokenHash"
-    ]) && isSecret(value.accessTokenHash);
-  }
-  return hasExactKeys(value, ["version", "deviceId", "sessionToken", "decision"]);
-}
-
-export function isValidCancelInvite(value) {
-  return hasExactKeys(value, ["version", "deviceId", "sessionToken"])
-    && value.version === PROTOCOL_VERSION
-    && isOpaqueId(value.deviceId)
-    && isSecret(value.sessionToken);
+export function isValidTap(value, roomId, deviceId = value?.deviceId) {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && value.type === "tap" && value.pairId === roomId
+    && value.deviceId === deviceId && isValidDeviceId(value.deviceId)
+    && Number.isSafeInteger(value.timestamp) && value.timestamp > 0;
 }
 
 export function isValidRevokeDevice(value) {
@@ -163,33 +75,18 @@ export function isValidEncryptedTap(value, pairId, deviceId) {
 
 export function canonicalEncryptedTap(value) {
   return JSON.stringify({
-    type: "encrypted_tap",
-    version: PROTOCOL_VERSION,
-    pairId: value.pairId,
-    sender: value.sender,
-    counter: value.counter,
-    iv: value.iv,
-    ciphertext: value.ciphertext
+    type: "tap", pairId: value.pairId, deviceId: value.deviceId, timestamp: value.timestamp
   });
 }
 
-export function updateRateWindow(state, now, limit = MAX_MESSAGES_PER_WINDOW) {
-  const windowStartedAt = Number.isSafeInteger(state?.windowStartedAt)
-    ? state.windowStartedAt
-    : now;
-  const messagesInWindow = Number.isSafeInteger(state?.messagesInWindow)
-    ? state.messagesInWindow
-    : 0;
-
+export function updateRateWindow(state, now) {
+  const windowStartedAt = Number.isSafeInteger(state?.windowStartedAt) ? state.windowStartedAt : now;
+  const messagesInWindow = Number.isSafeInteger(state?.messagesInWindow) ? state.messagesInWindow : 0;
   if (now - windowStartedAt >= RATE_LIMIT_WINDOW_MS || now < windowStartedAt) {
     return { windowStartedAt: now, messagesInWindow: 1, allowed: true };
   }
   const nextCount = messagesInWindow + 1;
-  return {
-    windowStartedAt,
-    messagesInWindow: nextCount,
-    allowed: nextCount <= limit
-  };
+  return { windowStartedAt, messagesInWindow: nextCount, allowed: nextCount <= MAX_MESSAGES_PER_WINDOW };
 }
 
 export function constantTimeEqual(left, right) {

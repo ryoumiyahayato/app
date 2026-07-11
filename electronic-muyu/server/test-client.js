@@ -19,6 +19,7 @@ const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const room = (process.argv[2] || 'test-room').trim();
 const deviceId = `test-client-${process.pid}`;
 const ACCEPT_TIMEOUT_MS = 5_000;
+const PROTOCOL_VERSION = 2;
 
 function buildTargetUrl() {
     if (!room || room.length > 64 || /[\u0000-\u001F\u007F]/.test(room)) {
@@ -68,7 +69,7 @@ let userClosing = false;
 let finished = false;
 
 const acceptTimer = setTimeout(() => {
-    finish(1, '等待 relay 接受连接超时');
+    finish(1, '等待 relay 完成 hello 握手超时');
 }, ACCEPT_TIMEOUT_MS);
 
 console.log(
@@ -76,10 +77,16 @@ console.log(
     + `roomHash=${shortHash(room)} deviceId=${maskDeviceId(deviceId)} `
     + `auth=${RELAY_TOKEN ? 'enabled' : 'disabled'}`
 );
-console.log('[test-client] relay 接受连接后，按 Enter 发送 tap；输入 q 后回车退出');
+console.log('[test-client] 握手完成后，按 Enter 发送 tap；输入 q 后回车退出');
 
 ws.on('open', () => {
-    console.log('[test-client] WebSocket 已打开，等待 room_info');
+    console.log('[test-client] WebSocket 已打开，发送 hello');
+    ws.send(JSON.stringify({
+        type: 'hello',
+        pairId: room,
+        deviceId,
+        protocolVersion: PROTOCOL_VERSION
+    }));
 });
 
 ws.on('message', (data, isBinary) => {
@@ -90,14 +97,20 @@ ws.on('message', (data, isBinary) => {
 
     try {
         const message = JSON.parse(data.toString());
-        if (message.type === 'room_info') {
-            if (message.room !== room) {
-                finish(1, 'relay 返回了不匹配的 room');
+        if (message.type === 'hello_required') {
+            return;
+        }
+        if (message.type === 'room_state') {
+            if (message.pairId !== room) {
+                finish(1, 'relay 返回了不匹配的 pairId');
                 return;
             }
             accepted = true;
             clearTimeout(acceptTimer);
-            console.log(`[test-client] relay 已接受，在线连接数=${message.connections}`);
+            console.log(
+                `[test-client] 握手完成，设备连接数=${message.connections} `
+                + `对方在线=${Boolean(message.peerOnline)}`
+            );
             return;
         }
 
@@ -131,7 +144,7 @@ rl.on('line', (input) => {
     }
 
     if (!accepted || ws.readyState !== WebSocket.OPEN) {
-        console.log('[test-client] relay 尚未接受连接，未发送');
+        console.log('[test-client] hello 握手尚未完成，未发送');
         return;
     }
 

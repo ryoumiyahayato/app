@@ -70,26 +70,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val vibrationEnabled: StateFlow<Boolean> = _vibrationEnabled.asStateFlow()
     private val _notificationEnabled = MutableStateFlow(false)
     val notificationEnabled: StateFlow<Boolean> = _notificationEnabled.asStateFlow()
-    private val _lastReceivedEvent = MutableStateFlow<Long?>(null)
-    val lastReceivedEvent: StateFlow<Long?> = _lastReceivedEvent.asStateFlow()
-    private val _pairingUiState = MutableStateFlow(PairingUiState())
-    val pairingUiState: StateFlow<PairingUiState> = _pairingUiState.asStateFlow()
-    private val _storedPair = MutableStateFlow<PairMetadata?>(null)
-    val storedPair: StateFlow<PairMetadata?> = _storedPair.asStateFlow()
-    private val _debugRelayOverride = MutableStateFlow("")
-    val debugRelayOverride: StateFlow<String> = _debugRelayOverride.asStateFlow()
 
-    val allowRelayOverride: Boolean = BuildConfig.ALLOW_RELAY_OVERRIDE
     val connectionState: StateFlow<ConnectionState> = MuyuConnectionRepository.connectionState
     val lastError: StateFlow<String> = MuyuConnectionRepository.lastError
-    val lastDisconnectReason = MuyuConnectionRepository.lastDisconnectReason
-    val lastDisconnectAtMillis = MuyuConnectionRepository.lastDisconnectAtMillis
-    val isReconnecting = MuyuConnectionRepository.isReconnecting
-    val lastReconnectResult = MuyuConnectionRepository.lastReconnectResult
-    val isServiceRunning = MuyuConnectionRepository.isServiceRunning
-    val foregroundNotificationText = MuyuConnectionRepository.foregroundNotificationText
-    val isAppInForeground = MuyuConnectionRepository.appForeground
-    val wsEnabled = MuyuConnectionRepository.isServiceRunning
+    val partnerOnline: StateFlow<Boolean> = MuyuConnectionRepository.partnerOnline
+
+    private val _deviceId = MutableStateFlow("")
+    val deviceId: StateFlow<String> = _deviceId.asStateFlow()
+
+    private val _deviceIdDisplay = MutableStateFlow("")
+    val deviceIdDisplay: StateFlow<String> = _deviceIdDisplay.asStateFlow()
+
+    private val _serverUrl = MutableStateFlow(DEFAULT_SERVER_URL)
+    val serverUrl: StateFlow<String> = _serverUrl.asStateFlow()
+
+    private val _roomId = MutableStateFlow(DEFAULT_ROOM_ID)
+    val roomId: StateFlow<String> = _roomId.asStateFlow()
+
+    private val _lastTappedTime = MutableStateFlow<Long?>(null)
+    val lastTappedTime: StateFlow<Long?> = _lastTappedTime.asStateFlow()
+
+    private val _lastReceivedTime = MutableStateFlow<Long?>(null)
+    val lastReceivedTime: StateFlow<Long?> = _lastReceivedTime.asStateFlow()
+
+    private val _lastReceivedEvent = MutableStateFlow<Long?>(null)
+    val lastReceivedEvent: StateFlow<Long?> = _lastReceivedEvent.asStateFlow()
+
+    private val _wsEnabled = MutableStateFlow(false)
+    val wsEnabled: StateFlow<Boolean> = _wsEnabled.asStateFlow()
+
+    val lastDisconnectReason: StateFlow<WebSocketClient.DisconnectReason> =
+        MuyuConnectionRepository.lastDisconnectReason
+    val lastDisconnectAtMillis: StateFlow<Long?> = MuyuConnectionRepository.lastDisconnectAtMillis
+    val isReconnecting: StateFlow<Boolean> = MuyuConnectionRepository.isReconnecting
+    val lastReconnectResult: StateFlow<String> = MuyuConnectionRepository.lastReconnectResult
+    val isServiceRunning: StateFlow<Boolean> = MuyuConnectionRepository.isServiceRunning
+    val foregroundNotificationText: StateFlow<String> =
+        MuyuConnectionRepository.foregroundNotificationText
+    val isAppInForeground: StateFlow<Boolean> = MuyuConnectionRepository.appForeground
+
+    private val soundManager = SoundManager(application)
+    private val vibrationManager = VibrationManager(application)
+    private var connectionStartPending = false
+    private var connectionRequestGeneration = 0L
+
+    companion object {
+        val DEFAULT_SERVER_URL = if (BuildConfig.DEBUG) "ws://10.0.2.2:8443" else ""
+        const val DEFAULT_ROOM_ID = "test-room"
+        private const val MAX_ROOM_ID_LENGTH = 64
+        private const val MAX_SERVER_URL_LENGTH = 2048
+        private const val MAX_UI_EVENT_AGE_MS = 10_000L
+    }
 
     init {
         viewModelScope.launch {
@@ -141,7 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     events.forEach { event ->
                         if (now - event.receivedAtMillis in 0L..10_000L) {
                             _lastReceivedEvent.value = event.id
-                            playSoundAndVibrate()
+                            playRemoteFeedback()
                         }
                     }
                 } finally {
@@ -506,10 +537,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         require(transcript.inviter.deviceId != transcript.joiner.deviceId)
     }
 
-    private fun localDevice(active: PendingPairing, transcript: PairingTranscript) =
-        if (active.role == Role.INVITER) transcript.inviter else transcript.joiner
-    private fun peerDevice(active: PendingPairing, transcript: PairingTranscript) =
-        if (active.role == Role.INVITER) transcript.joiner else transcript.inviter
+        return try {
+            val parsedUri = trimmedServerUrl.toUri()
+            val scheme = parsedUri.scheme?.lowercase()
+            if (
+                (scheme != "ws" && scheme != "wss") ||
+                (!BuildConfig.DEBUG && scheme != "wss") ||
+                parsedUri.host.isNullOrBlank() ||
+                !parsedUri.encodedUserInfo.isNullOrEmpty() ||
+                parsedUri.fragment != null ||
+                !LocalDataStore.canStoreConnectionUrl(trimmedServerUrl)
+            ) {
+                return null
+            }
 
     private suspend fun resolveDeviceId(): String = dataStore.getOrCreateDeviceId {
         PairingCrypto.randomBase64Url(16)
@@ -547,6 +587,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun playSoundAndVibrate() {
         if (_soundEnabled.value) soundManager.playMuyuHit()
         if (_vibrationEnabled.value) vibrationManager.shortTap()
+    }
+
+    private fun playRemoteFeedback() {
+        if (_soundEnabled.value) {
+            soundManager.playNotificationTap()
+        }
+        if (_vibrationEnabled.value) {
+            vibrationManager.notificationVibrate()
+        }
     }
 
     override fun onCleared() {

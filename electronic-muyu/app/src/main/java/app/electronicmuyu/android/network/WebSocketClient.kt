@@ -20,38 +20,41 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
+import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 
-data class SecureSocketCredentials(
-    val url: String,
-    val pairId: String,
-    val deviceId: String,
-    val peerDeviceId: String,
-    val accessToken: String,
-    val expectedSlot: Int
-)
-
-class WebSocketClient(private val scope: CoroutineScope) {
+/**
+ * 电子木鱼 WebSocket 客户端。
+ *
+ * 每个 MuyuForegroundService 实例只创建一个客户端。连接操作、回调和重连任务都串行化到
+ * Service 提供的主协程作用域，并通过 connectionGeneration 隔离旧 socket 回调。
+ */
+class WebSocketClient(
+    private val scope: CoroutineScope
+) {
     companion object {
         private const val TAG = "ElectronicMuyu"
         private const val INITIAL_RETRY_DELAY_MS = 1_000L
         private const val MAX_RETRY_DELAY_MS = 60_000L
+        private const val RATE_LIMIT_RETRY_DELAY_MS = 15_000L
 
         internal fun retryDelayForAttempt(attempt: Int): Long {
             val delayMs = INITIAL_RETRY_DELAY_MS * (1L shl attempt.coerceIn(0, 6))
             return delayMs.coerceAtMost(MAX_RETRY_DELAY_MS)
         }
 
-        internal fun jitteredRetryDelay(attempt: Int, unit: Double = Random.nextDouble()): Long {
-            val factor = 0.75 + unit.coerceIn(0.0, 1.0) * 0.5
-            return (retryDelayForAttempt(attempt) * factor).toLong().coerceAtLeast(250L)
+        internal fun disconnectReasonForCloseCode(code: Int): DisconnectReason {
+            return when (code) {
+                4000, 4001, 4002, 4003, 4004, 1003, 1009 -> DisconnectReason.SERVER_REJECTED
+                4008 -> DisconnectReason.RATE_LIMITED
+                else -> DisconnectReason.SERVER_CLOSED
+            }
         }
 
-        internal fun disconnectReasonForCloseCode(code: Int): DisconnectReason = when (code) {
-            4401, 4410 -> DisconnectReason.AUTHENTICATION_FAILED
-            4403 -> DisconnectReason.PAIR_REVOKED
-            4408 -> DisconnectReason.RATE_LIMITED
-            4400, 4409, 4414, 1003, 1009 -> DisconnectReason.SERVER_REJECTED
-            else -> DisconnectReason.SERVER_CLOSED
+        internal fun shouldReconnect(reason: DisconnectReason): Boolean {
+            return reason == DisconnectReason.NETWORK_ERROR ||
+                reason == DisconnectReason.SERVER_CLOSED ||
+                reason == DisconnectReason.RATE_LIMITED
         }
 
         internal fun shouldReconnect(reason: DisconnectReason): Boolean =
@@ -90,6 +93,10 @@ class WebSocketClient(private val scope: CoroutineScope) {
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+
+    private val _partnerOnline = MutableStateFlow(false)
+    val partnerOnline: StateFlow<Boolean> = _partnerOnline.asStateFlow()
+
     private val _lastError = MutableStateFlow("")
     val lastError: StateFlow<String> = _lastError.asStateFlow()
     private val _lastDisconnectReason = MutableStateFlow(DisconnectReason.UNKNOWN)
@@ -129,6 +136,7 @@ class WebSocketClient(private val scope: CoroutineScope) {
         this.credentials = credentials
         authenticated = false
         _lastError.value = ""
+        _partnerOnline.value = false
         _connectionState.value = if (force) ConnectionState.RECONNECTING else ConnectionState.CONNECTING
         Log.d(TAG, "secure socket connecting pairHash=${shortHash(credentials.pairId)}")
 
@@ -137,44 +145,50 @@ class WebSocketClient(private val scope: CoroutineScope) {
                 scope.launch {
                     if (!isCurrent(currentGeneration, socket)) return@launch
                     webSocket = socket
-                    _connectionState.value = ConnectionState.AUTHENTICATING
-                    val auth = JSONObject().apply {
-                        put("type", "auth")
-                        put("version", PAIRING_PROTOCOL_VERSION)
-                        put("pairId", credentials.pairId)
-                        put("deviceId", credentials.deviceId)
-                        put("token", credentials.accessToken)
+                    if (!sendHello(socket)) {
+                        _lastError.value = "连接握手发送失败"
+                        socket.close(1011, "hello send failed")
+                        return@launch
                     }
-                    if (!socket.send(auth.toString())) {
-                        socket.cancel()
-                        failTerminal(DisconnectReason.NETWORK_ERROR, "连接认证发送失败")
-                    }
+                    Log.d(TAG, "websocket open; hello sent roomHash=${shortHash(this@WebSocketClient.pairId)}")
                 }
             }
 
             override fun onMessage(socket: WebSocket, text: String) {
                 scope.launch {
-                    if (!isCurrent(currentGeneration, socket)) return@launch
-                    if (!authenticated) {
-                        if (!isValidAuthOk(text, credentials.expectedSlot)) {
-                            socket.close(4401, "authentication failed")
+                    if (!isCurrentConnection(generation, socket)) return@launch
+
+                    val objectMessage = try {
+                        JSONObject(text)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    when (objectMessage?.optString("type")) {
+                        "room_state" -> {
+                            if (objectMessage.optString("pairId") != this@WebSocketClient.pairId) {
+                                Log.d(TAG, "received mismatched room_state; ignoring")
+                                return@launch
+                            }
+                            completeHandshake(objectMessage.optBoolean("peerOnline", false))
                             return@launch
                         }
-                        authenticated = true
-                        retryAttempt = 0
-                        reconnectJob = null
-                        _isReconnecting.value = false
-                        _lastReconnectResult.value = "success"
-                        _connectionState.value = ConnectionState.CONNECTED
-                        Log.d(TAG, "secure socket authenticated pairHash=${shortHash(credentials.pairId)}")
-                        return@launch
+                        "room_info" -> {
+                            // Compatibility with one deployment generation while both relays roll forward.
+                            completeHandshake(objectMessage.optInt("connections", 1) >= 2)
+                            return@launch
+                        }
                     }
-                    val message = EncryptedTap.fromJson(text)
-                    if (message == null || message.pairId != credentials.pairId ||
-                        message.sender != credentials.peerDeviceId
+
+                    val event = TapEvent.fromJson(text)
+                    if (
+                        event != null &&
+                        event.pairId == this@WebSocketClient.pairId &&
+                        event.deviceId != this@WebSocketClient.deviceId
                     ) {
-                        Log.d(TAG, "rejected invalid encrypted envelope")
-                        return@launch
+                        Log.d(TAG, "received tap from deviceId=${maskDeviceId(event.deviceId)}")
+                        onTapReceived?.invoke(event)
+                    } else if (objectMessage?.optString("type") != "hello_required") {
+                        Log.d(TAG, "received invalid, mismatched, or self message; ignoring")
                     }
                     onEncryptedTapReceived?.invoke(message)
                 }
@@ -231,6 +245,7 @@ class WebSocketClient(private val scope: CoroutineScope) {
         credentials = null
         recordDisconnect(reason)
         _isReconnecting.value = false
+        _partnerOnline.value = false
         _lastReconnectResult.value = "stopped: ${reason.label}"
         _connectionState.value = if (reason == DisconnectReason.PAIR_REVOKED) ConnectionState.REVOKED else ConnectionState.DISCONNECTED
         socket?.let { if (!it.close(1000, reason.label)) it.cancel() }
@@ -243,26 +258,38 @@ class WebSocketClient(private val scope: CoroutineScope) {
         client.dispatcher.executorService.shutdown()
     }
 
-    private fun finish(reason: DisconnectReason, message: String) {
-        recordDisconnect(reason)
-        authenticated = false
-        _lastError.value = message
-        _connectionState.value = when (reason) {
-            DisconnectReason.AUTHENTICATION_FAILED -> ConnectionState.AUTHENTICATION_FAILED
-            DisconnectReason.PAIR_REVOKED -> ConnectionState.REVOKED
-            else -> ConnectionState.DISCONNECTED
-        }
-        if (shouldReconnect(reason)) scheduleReconnect() else {
+    private fun isCurrentConnection(generation: Long, socket: WebSocket): Boolean {
+        return generation == connectionGeneration && (webSocket == null || webSocket === socket)
+    }
+
+    private fun retireCurrentConnection(generation: Long, socket: WebSocket): Boolean {
+        if (!isCurrentConnection(generation, socket)) return false
+        webSocket = null
+        _partnerOnline.value = false
+        connectionGeneration++
+        return true
+    }
+
+    private fun finishOrReconnect(reason: DisconnectReason) {
+        if (shouldReconnect(reason)) {
+            scheduleReconnect(reason)
+        } else {
             _isReconnecting.value = false
             _lastReconnectResult.value = "stopped: ${reason.label}"
         }
     }
 
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(reason: DisconnectReason) {
         if (reconnectJob?.isActive == true) return
         val saved = credentials ?: return
         reconnectJob = scope.launch {
-            val delayMs = jitteredRetryDelay(retryAttempt++)
+            val normalDelay = retryDelayForAttempt(retryAttempt)
+            val delayMs = if (reason == DisconnectReason.RATE_LIMITED) {
+                maxOf(normalDelay, RATE_LIMIT_RETRY_DELAY_MS)
+            } else {
+                normalDelay
+            }
+            retryAttempt++
             _isReconnecting.value = true
             _connectionState.value = ConnectionState.RECONNECTING
             _lastReconnectResult.value = "scheduled in ${delayMs}ms"
@@ -272,21 +299,47 @@ class WebSocketClient(private val scope: CoroutineScope) {
         }
     }
 
-    private fun failTerminal(reason: DisconnectReason, message: String) {
-        _lastError.value = message
-        _connectionState.value = ConnectionState.DISCONNECTED
-        _isReconnecting.value = false
-        recordDisconnect(reason)
+    private fun sendHello(socket: WebSocket): Boolean {
+        val payload = JSONObject().apply {
+            put("type", "hello")
+            put("pairId", pairId)
+            put("deviceId", deviceId)
+            put("protocolVersion", 2)
+        }.toString()
+        return socket.send(payload)
     }
 
-    private fun isCurrent(value: Long, socket: WebSocket): Boolean =
-        value == generation && (webSocket == null || webSocket === socket)
+    private fun completeHandshake(peerOnline: Boolean) {
+        _partnerOnline.value = peerOnline
+        _lastError.value = ""
+        _connectionState.value = ConnectionState.CONNECTED
+        _isReconnecting.value = false
+        _lastReconnectResult.value = if (retryAttempt > 0) "success" else "not_needed"
+        reconnectJob = null
+        retryAttempt = 0
+        Log.d(TAG, "handshake complete peerOnline=$peerOnline roomHash=${shortHash(pairId)}")
+    }
 
-    private fun retire(value: Long, socket: WebSocket): Boolean {
-        if (!isCurrent(value, socket)) return false
-        webSocket = null
-        generation++
-        return true
+    private fun disconnectReasonForHttpStatus(statusCode: Int?): DisconnectReason {
+        if (statusCode == 429) return DisconnectReason.RATE_LIMITED
+        if (statusCode != null && statusCode in 400..499) {
+            return DisconnectReason.SERVER_REJECTED
+        }
+        return DisconnectReason.NETWORK_ERROR
+    }
+
+    private fun userMessageForCloseCode(code: Int): String? {
+        return when (code) {
+            4000 -> "服务器拒绝连接：房间参数无效"
+            4001 -> "服务器拒绝连接：鉴权失败"
+            4002 -> "服务器拒绝连接：房间已满"
+            4003 -> "服务器当前连接数已满"
+            4004 -> "当前连接已被同一设备的新连接替换"
+            4008 -> "发送频率过高，稍后将自动重连"
+            1003 -> "服务器仅接受文本消息"
+            1009 -> "消息超过服务器允许的大小"
+            else -> null
+        }
     }
 
     private fun recordDisconnect(reason: DisconnectReason) {

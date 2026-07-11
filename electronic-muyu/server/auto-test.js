@@ -14,7 +14,8 @@ const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const MAX_MESSAGES_PER_WINDOW = Number(process.env.MAX_MESSAGES_PER_WINDOW || 60);
 const MAX_TOTAL_CONNECTIONS = Number(process.env.MAX_TOTAL_CONNECTIONS || 100);
 const HEARTBEAT_INTERVAL_MS = Number(process.env.HEARTBEAT_INTERVAL_MS || 30_000);
-const TIMEOUT_MS = 5_000;
+const TIMEOUT_MS = 7_000;
+const PROTOCOL_VERSION = 2;
 const roomA = `auto-a-${Date.now()}-${process.pid}`;
 const roomB = `auto-b-${Date.now()}-${process.pid}`;
 const clients = new Set();
@@ -42,125 +43,49 @@ function shortHash(value) {
     return crypto.createHash('sha256').update(value).digest('hex').substring(0, 8);
 }
 
-function createClient(name, room, options = {}) {
-    return new Promise((resolve, reject) => {
-        const socket = new WebSocket(buildUrl(room), options);
-        socket.clientName = name;
-        socket.deviceId = `auto-${name}-${process.pid}`;
-        clients.add(socket);
-
-        let settled = false;
-        const timer = setTimeout(() => {
-            if (settled) return;
-            settled = true;
-            socket.terminate();
-            reject(new Error(`${name} 等待 room_info 超时`));
-        }, TIMEOUT_MS);
-
-        const onMessage = (data, isBinary) => {
-            if (settled || isBinary) return;
-            try {
-                const message = JSON.parse(data.toString());
-                if (message.type === 'room_info' && message.room === room) {
-                    settled = true;
-                    clearTimeout(timer);
-                    socket.removeListener('message', onMessage);
-                    resolve(socket);
-                }
-            } catch (_) {
-                // 等待下一条可解析消息。
-            }
-        };
-
-        socket.on('message', onMessage);
-        socket.once('close', (code, reasonBuffer) => {
-            if (!settled) {
-                settled = true;
-                clearTimeout(timer);
-                reject(new Error(
-                    `${name} 在接受前关闭 code=${code} reason=${reasonBuffer?.toString() || 'none'}`
-                ));
-            }
-        });
-        socket.once('error', (err) => {
-            if (!settled) {
-                settled = true;
-                clearTimeout(timer);
-                reject(err);
-            }
-        });
-    });
-}
-
-function expectRejectedClient(name, room, expectedCode, token = RELAY_TOKEN) {
-    return new Promise((resolve, reject) => {
-        const socket = new WebSocket(buildUrl(room, token));
-        clients.add(socket);
-        const timer = setTimeout(() => {
-            socket.terminate();
-            reject(new Error(`${name} 未在预期时间内被拒绝`));
-        }, TIMEOUT_MS);
-
-        socket.once('close', (code) => {
-            clearTimeout(timer);
-            if (code === expectedCode) {
-                resolve();
-            } else {
-                reject(new Error(`${name} 关闭码=${code}，预期=${expectedCode}`));
-            }
-        });
-        socket.once('error', () => {
-            // close 事件负责判断服务端关闭码。
-        });
-    });
-}
-
-function waitForClose(socket, expectedCode) {
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            socket.terminate();
-            reject(new Error(`${socket.clientName} 未在预期时间内关闭`));
-        }, TIMEOUT_MS);
-
-        socket.once('close', (code) => {
-            clearTimeout(timer);
-            if (code === expectedCode) {
-                resolve();
-            } else {
-                reject(new Error(
-                    `${socket.clientName} 关闭码=${code}，预期=${expectedCode}`
-                ));
-            }
-        });
-    });
-}
-
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function waitForTap(socket, expectedDeviceId, timeoutMs = TIMEOUT_MS) {
+function waitForJson(socket, predicate, description, timeoutMs = TIMEOUT_MS) {
     return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
             socket.removeListener('message', handler);
-            reject(new Error(`${socket.clientName} 等待 tap 超时`));
+            reject(new Error(`${socket.clientName} 等待 ${description} 超时`));
         }, timeoutMs);
 
         const handler = (data, isBinary) => {
             if (isBinary) return;
             try {
                 const message = JSON.parse(data.toString());
-                if (message.type === 'tap' && message.deviceId === expectedDeviceId) {
-                    clearTimeout(timer);
-                    socket.removeListener('message', handler);
-                    resolve(message);
-                }
+                if (!predicate(message)) return;
+                clearTimeout(timer);
+                socket.removeListener('message', handler);
+                resolve(message);
             } catch (_) {
-                // 忽略无关消息。
+                // 等待下一条可解析消息。
             }
         };
         socket.on('message', handler);
     });
+}
+
+function waitForRoomState(socket, predicate = () => true, timeoutMs = TIMEOUT_MS) {
+    return waitForJson(
+        socket,
+        (message) => message.type === 'room_state' && predicate(message),
+        'room_state',
+        timeoutMs
+    );
+}
+
+function waitForTap(socket, expectedDeviceId, timeoutMs = TIMEOUT_MS) {
+    return waitForJson(
+        socket,
+        (message) => message.type === 'tap' && message.deviceId === expectedDeviceId,
+        'tap',
+        timeoutMs
+    );
 }
 
 function expectNoTap(socket, timeoutMs = 500) {
@@ -169,11 +94,10 @@ function expectNoTap(socket, timeoutMs = 500) {
             if (isBinary) return;
             try {
                 const message = JSON.parse(data.toString());
-                if (message.type === 'tap') {
-                    clearTimeout(timer);
-                    socket.removeListener('message', handler);
-                    reject(new Error(`${socket.clientName} 收到了不应出现的 tap`));
-                }
+                if (message.type !== 'tap') return;
+                clearTimeout(timer);
+                socket.removeListener('message', handler);
+                reject(new Error(`${socket.clientName} 收到了不应出现的 tap`));
             } catch (_) {
                 // 忽略无关消息。
             }
@@ -186,14 +110,129 @@ function expectNoTap(socket, timeoutMs = 500) {
     });
 }
 
+function waitForClose(socket, expectedCode, timeoutMs = TIMEOUT_MS) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            socket.terminate();
+            reject(new Error(`${socket.clientName || 'client'} 未以 ${expectedCode} 关闭`));
+        }, timeoutMs);
+
+        socket.once('close', (code, reasonBuffer) => {
+            clearTimeout(timer);
+            if (code === expectedCode) {
+                resolve(reasonBuffer?.toString() || '');
+            } else {
+                reject(new Error(
+                    `${socket.clientName || 'client'} 关闭码=${code}，预期=${expectedCode}`
+                ));
+            }
+        });
+    });
+}
+
+function createClient(name, room, options = {}, deviceIdOverride = null) {
+    return new Promise((resolve, reject) => {
+        const socket = new WebSocket(buildUrl(room), options);
+        socket.clientName = name;
+        socket.deviceId = deviceIdOverride || `auto-${name}-${process.pid}`;
+        clients.add(socket);
+
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            socket.terminate();
+            reject(new Error(`${name} 等待 hello 握手超时`));
+        }, TIMEOUT_MS);
+
+        const onMessage = (data, isBinary) => {
+            if (settled || isBinary) return;
+            try {
+                const message = JSON.parse(data.toString());
+                if (message.type !== 'room_state' || message.pairId !== room) return;
+                settled = true;
+                clearTimeout(timer);
+                socket.removeListener('message', onMessage);
+                socket.initialRoomState = message;
+                resolve(socket);
+            } catch (_) {
+                // 等待下一条可解析消息。
+            }
+        };
+
+        socket.on('message', onMessage);
+        socket.once('open', () => {
+            socket.send(JSON.stringify({
+                type: 'hello',
+                pairId: room,
+                deviceId: socket.deviceId,
+                protocolVersion: PROTOCOL_VERSION
+            }));
+        });
+        socket.once('close', (code, reasonBuffer) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(new Error(
+                `${name} 在握手前关闭 code=${code} reason=${reasonBuffer?.toString() || 'none'}`
+            ));
+        });
+        socket.once('error', (error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(error);
+        });
+    });
+}
+
+function expectRejectedClient(
+    name,
+    room,
+    expectedCode,
+    token = RELAY_TOKEN,
+    deviceId = `auto-${name}-${process.pid}`,
+    sendHello = true
+) {
+    return new Promise((resolve, reject) => {
+        const socket = new WebSocket(buildUrl(room, token));
+        socket.clientName = name;
+        clients.add(socket);
+        const timer = setTimeout(() => {
+            socket.terminate();
+            reject(new Error(`${name} 未在预期时间内被拒绝`));
+        }, TIMEOUT_MS);
+
+        if (sendHello) {
+            socket.once('open', () => {
+                socket.send(JSON.stringify({
+                    type: 'hello',
+                    pairId: room,
+                    deviceId,
+                    protocolVersion: PROTOCOL_VERSION
+                }));
+            });
+        }
+
+        socket.once('close', (code) => {
+            clearTimeout(timer);
+            if (code === expectedCode) resolve();
+            else reject(new Error(`${name} 关闭码=${code}，预期=${expectedCode}`));
+        });
+        socket.once('error', () => {
+            // close 事件负责判断服务端关闭码。
+        });
+    });
+}
+
 function sendJson(socket, message) {
     return new Promise((resolve, reject) => {
         if (socket.readyState !== WebSocket.OPEN) {
             reject(new Error(`${socket.clientName} 当前不可发送`));
             return;
         }
-        socket.send(JSON.stringify(message), (err) => {
-            if (err) reject(err); else resolve();
+        socket.send(JSON.stringify(message), (error) => {
+            if (error) reject(error); else resolve();
         });
     });
 }
@@ -204,8 +243,8 @@ function sendRaw(socket, payload, options) {
             reject(new Error(`${socket.clientName} 当前不可发送`));
             return;
         }
-        socket.send(payload, options, (err) => {
-            if (err) reject(err); else resolve();
+        socket.send(payload, options, (error) => {
+            if (error) reject(error); else resolve();
         });
     });
 }
@@ -252,8 +291,7 @@ async function run() {
         if (ordinaryHttpResponse.status !== 426) {
             throw new Error(`普通 HTTP 状态=${ordinaryHttpResponse.status}，预期=426`);
         }
-        passed++;
-        console.log(`[${passed}] /health 返回 200，普通 HTTP 路径返回 426`);
+        console.log(`[${++passed}] /health 返回 200，普通 HTTP 路径返回 426`);
 
         const capacityClients = [];
         for (let index = 0; index < MAX_TOTAL_CONNECTIONS; index++) {
@@ -261,13 +299,17 @@ async function run() {
                 await createClient(`capacity-${index}`, `capacity-${roomA}-${index}`)
             );
         }
-        await expectRejectedClient('over-capacity', `${roomB}-capacity`, 4003);
+        await expectRejectedClient(
+            'over-capacity',
+            `${roomB}-capacity`,
+            4003,
+            RELAY_TOKEN,
+            'over-capacity-device',
+            false
+        );
         capacityClients.forEach((socket) => socket.terminate());
         await delay(200);
-        passed++;
-        console.log(
-            `[${passed}] 总连接达到 ${MAX_TOTAL_CONNECTIONS} 后新连接被 4003 拒绝`
-        );
+        console.log(`[${++passed}] 总连接达到 ${MAX_TOTAL_CONNECTIONS} 后新连接被 4003 拒绝`);
 
         if (HEARTBEAT_INTERVAL_MS <= 2_000) {
             const unresponsiveClient = await createClient(
@@ -275,17 +317,22 @@ async function run() {
                 `${roomB}-no-pong`,
                 { autoPong: false }
             );
-            const heartbeatClosed = waitForClose(unresponsiveClient, 1006);
-            await heartbeatClosed;
-            passed++;
-            console.log(`[${passed}] 不回应 ping 的连接被心跳终止并释放`);
+            await waitForClose(unresponsiveClient, 1006);
+            console.log(`[${++passed}] 不回应 ping 的连接被心跳终止并释放`);
         }
 
-        const clientA = await createClient('A', roomA);
+        let clientA = await createClient('A', roomA);
+        if (clientA.initialRoomState.peerOnline !== false) {
+            throw new Error('房间内第一台设备应显示对方离线');
+        }
+        const aSeesOnline = waitForRoomState(clientA, (state) => state.peerOnline === true);
         const clientB = await createClient('B', roomA);
+        await aSeesOnline;
+        if (clientB.initialRoomState.peerOnline !== true) {
+            throw new Error('第二台设备加入后应显示对方在线');
+        }
         const clientC = await createClient('C', roomB);
-        passed++;
-        console.log(`[${passed}] 两个同房间客户端和一个隔离房间客户端连接成功`);
+        console.log(`[${++passed}] 同房间双方收到在线状态，不同房间独立连接`);
 
         const receiveAtB = waitForTap(clientB, clientA.deviceId);
         const noEchoAtA = expectNoTap(clientA);
@@ -294,24 +341,35 @@ async function run() {
         const messageAtB = await receiveAtB;
         await Promise.all([noEchoAtA, noCrossRoomAtC]);
         if (messageAtB.pairId !== roomA) throw new Error('转发后的 pairId 不匹配');
-        passed++;
-        console.log(`[${passed}] A→B 转发成功，发送方无回显，不同房间无串消息`);
+        console.log(`[${++passed}] A→B 转发成功，发送方无回显，不同房间无串消息`);
 
         const receiveAtA = waitForTap(clientA, clientB.deviceId);
         await sendTap(clientB, roomA);
         await receiveAtA;
-        passed++;
-        console.log(`[${passed}] B→A 反向转发成功`);
+        console.log(`[${++passed}] B→A 反向转发成功`);
+
+        const oldClientA = clientA;
+        const oldClientClosed = waitForClose(oldClientA, 4004);
+        clientA = await createClient('A-replacement', roomA, {}, oldClientA.deviceId);
+        await oldClientClosed;
+        if (clientA.initialRoomState.peerOnline !== true) {
+            throw new Error('同设备替换旧连接后应保持对方在线');
+        }
+        const receiveAfterReplacement = waitForTap(clientA, clientB.deviceId);
+        await sendTap(clientB, roomA);
+        await receiveAfterReplacement;
+        console.log(`[${++passed}] 同 deviceId 新连接替换旧连接并继续转发`);
 
         await expectRejectedClient('third-client', roomA, 4002);
-        passed++;
-        console.log(`[${passed}] 同一房间第三个连接被 4002 拒绝`);
+        console.log(`[${++passed}] 真正第三台设备被 4002 拒绝`);
 
         const noInvalidTapAtB = expectNoTap(clientB);
         await sendTap(clientA, roomA, { pairId: `${roomA}-wrong` });
         await noInvalidTapAtB;
-        passed++;
-        console.log(`[${passed}] pairId 不匹配的 tap 未被转发`);
+        const noChangedDeviceAtB = expectNoTap(clientB);
+        await sendTap(clientA, roomA, { deviceId: 'changed-device' });
+        await noChangedDeviceAtB;
+        console.log(`[${++passed}] pairId 或 deviceId 不匹配的 tap 未被转发`);
 
         const noUnknownMessageAtB = expectNoTap(clientB);
         await sendJson(clientA, { type: 'unknown' });
@@ -319,52 +377,67 @@ async function run() {
         const noMalformedMessageAtB = expectNoTap(clientB);
         await sendRaw(clientA, '{not-json');
         await noMalformedMessageAtB;
-        passed++;
-        console.log(`[${passed}] 未知类型和异常 JSON 未被转发，relay 继续运行`);
+        console.log(`[${++passed}] 未知类型和异常 JSON 未被转发，relay 继续运行`);
 
-        await expectRejectedClient('invalid-room', '', 4000);
-        passed++;
-        console.log(`[${passed}] 空 room 被 4000 拒绝`);
+        await expectRejectedClient('invalid-room', '', 4000, RELAY_TOKEN, 'invalid-room', false);
+        console.log(`[${++passed}] 空 room 被 4000 拒绝`);
 
         if (RELAY_TOKEN) {
-            await expectRejectedClient('invalid-token', `${roomB}-auth`, 4001, 'wrong-token');
-            passed++;
-            console.log(`[${passed}] 错误 token 被 4001 拒绝`);
+            await expectRejectedClient(
+                'invalid-token',
+                `${roomB}-auth`,
+                4001,
+                'wrong-token',
+                'invalid-token-device',
+                false
+            );
+            console.log(`[${++passed}] 错误 token 被 4001 拒绝`);
         }
+
+        const helloRequired = new WebSocket(buildUrl(`${roomB}-hello-required`));
+        helloRequired.clientName = 'hello-required';
+        clients.add(helloRequired);
+        const helloRequiredClosed = waitForClose(helloRequired, 4004);
+        helloRequired.once('open', () => {
+            helloRequired.send(JSON.stringify({ type: 'tap' }));
+        });
+        await helloRequiredClosed;
+        console.log(`[${++passed}] 未完成 hello 握手的消息被 4004 拒绝`);
 
         const binaryClient = await createClient('binary', `${roomB}-binary`);
         const binaryClosed = waitForClose(binaryClient, 1003);
         await sendRaw(binaryClient, Buffer.from([0x01, 0x02]), { binary: true });
         await binaryClosed;
-        passed++;
-        console.log(`[${passed}] 二进制消息被 1003 关闭`);
+        console.log(`[${++passed}] 二进制消息被 1003 关闭`);
 
         const oversizedClient = await createClient('oversized', `${roomB}-oversized`);
         const oversizedClosed = waitForClose(oversizedClient, 1009);
         await sendRaw(oversizedClient, 'x'.repeat(4 * 1024 + 1));
         await oversizedClosed;
-        passed++;
-        console.log(`[${passed}] 超过 4 KB 的消息被 1009 关闭`);
+        console.log(`[${++passed}] 超过 4 KB 的消息被 1009 关闭`);
 
+        const aSeesOffline = waitForRoomState(clientA, (state) => state.peerOnline === false);
         clientB.terminate();
-        await delay(100);
-        const replacement = await createClient('replacement', roomA);
-        const receiveAtReplacement = waitForTap(replacement, clientA.deviceId);
+        await aSeesOffline;
+        const aSeesReplacementOnline = waitForRoomState(
+            clientA,
+            (state) => state.peerOnline === true
+        );
+        const replacementB = await createClient('replacement-B', roomA);
+        await aSeesReplacementOnline;
+        const receiveAtReplacementB = waitForTap(replacementB, clientA.deviceId);
         await sendTap(clientA, roomA);
-        await receiveAtReplacement;
-        passed++;
-        console.log(`[${passed}] 连接释放后房间名额可重用并继续转发`);
+        await receiveAtReplacementB;
+        console.log(`[${++passed}] 离线状态广播、名额释放和重新加入均正常`);
 
         const rateClient = await createClient('rate-limit', `${roomB}-rate`);
         const rateClosed = waitForClose(rateClient, 4008);
         for (let index = 0; index <= MAX_MESSAGES_PER_WINDOW; index++) {
+            if (rateClient.readyState !== WebSocket.OPEN) break;
             await sendJson(rateClient, { type: 'unknown', index });
         }
         await rateClosed;
-        passed++;
-        console.log(
-            `[${passed}] 超过 ${MAX_MESSAGES_PER_WINDOW}/10 秒后以 4008 关闭`
-        );
+        console.log(`[${++passed}] 超过 ${MAX_MESSAGES_PER_WINDOW}/10 秒后以 4008 关闭`);
 
         console.log(`[auto-test] 回归场景通过数=${passed}`);
     } finally {
@@ -378,7 +451,7 @@ async function run() {
     }
 }
 
-run().catch((err) => {
-    console.error('[auto-test] 失败:', err.message);
+run().catch((error) => {
+    console.error('[auto-test] 失败:', error.message);
     process.exitCode = 1;
 });

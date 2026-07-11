@@ -31,6 +31,9 @@ object MuyuConnectionRepository {
     private val _lastError = MutableStateFlow("")
     val lastError: StateFlow<String> = _lastError.asStateFlow()
 
+    private val _partnerOnline = MutableStateFlow(false)
+    val partnerOnline: StateFlow<Boolean> = _partnerOnline.asStateFlow()
+
     private val _isReconnecting = MutableStateFlow(false)
     val isReconnecting: StateFlow<Boolean> = _isReconnecting.asStateFlow()
 
@@ -70,6 +73,10 @@ object MuyuConnectionRepository {
 
     fun setLastError(error: String) {
         _lastError.value = error
+    }
+
+    fun setPartnerOnline(isOnline: Boolean) {
+        _partnerOnline.value = isOnline
     }
 
     fun setReconnecting(isReconnecting: Boolean) {

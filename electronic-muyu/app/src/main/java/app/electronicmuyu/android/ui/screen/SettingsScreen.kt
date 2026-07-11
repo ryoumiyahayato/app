@@ -40,11 +40,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
+import app.electronicmuyu.android.BuildConfig
+import app.electronicmuyu.android.data.LocalDataStore
 import app.electronicmuyu.android.model.ConnectionState
-import app.electronicmuyu.android.pairing.PairMetadata
-import app.electronicmuyu.android.pairing.PairingStage
-import app.electronicmuyu.android.pairing.PairingUiState
-import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlinx.coroutines.launch
+
+private const val MAX_ROOM_ID_LENGTH = 64
+private const val MAX_SERVER_URL_LENGTH = 2048
+private val DEFAULT_SERVER_URL = if (BuildConfig.DEBUG) "ws://10.0.2.2:8443" else ""
+private const val DEFAULT_ROOM_ID = "test-room"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,11 +62,18 @@ fun SettingsScreen(
     notificationEnabled: Boolean,
     notificationPermissionGranted: Boolean,
     connectionState: ConnectionState,
-    pairing: PairingUiState,
-    storedPair: PairMetadata?,
-    allowRelayOverride: Boolean,
-    debugRelayOverride: String,
-    lastError: String,
+    partnerOnline: Boolean,
+    wsEnabled: Boolean,
+    lastDisconnectReason: String,
+    lastDisconnectAtMillis: Long?,
+    isAppInForeground: Boolean,
+    isReconnecting: Boolean,
+    lastReconnectResult: String,
+    isServiceRunning: Boolean,
+    foregroundNotificationText: String,
+    serverUrl: String,
+    roomId: String,
+    deviceIdDisplay: String,
     onSoundToggle: (Boolean) -> Unit,
     onVibrationToggle: (Boolean) -> Unit,
     onNotificationToggle: (Boolean) -> Unit,
@@ -91,7 +106,127 @@ fun SettingsScreen(
         Column(
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.Top
+        ) {
+            Spacer(modifier = Modifier.height(8.dp))
+
+            FeedbackCard(
+                soundEnabled = soundEnabled,
+                vibrationEnabled = vibrationEnabled,
+                onSoundToggle = onSoundToggle,
+                onVibrationToggle = onVibrationToggle
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            NotificationCard(
+                notificationEnabled = notificationEnabled,
+                notificationPermissionGranted = notificationPermissionGranted,
+                notificationDeliveryStatus = notificationDeliveryStatus,
+                onNotificationToggle = onNotificationToggle,
+                onOpenNotificationSettings = onOpenNotificationSettings,
+                onSendTestNotification = onSendTestNotification
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            ConnectionConfigCard(
+                serverUrl = serverUrl,
+                roomId = roomId,
+                deviceIdDisplay = deviceIdDisplay,
+                onSaveConfig = onSaveConfig,
+                onResetDefaults = onResetDefaults
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            ConnectionCard(
+                connectionState = connectionState,
+                partnerOnline = partnerOnline,
+                wsEnabled = wsEnabled,
+                lastDisconnectReason = lastDisconnectReason,
+                lastDisconnectAtMillis = lastDisconnectAtMillis,
+                isAppInForeground = isAppInForeground,
+                isReconnecting = isReconnecting,
+                lastReconnectResult = lastReconnectResult,
+                isServiceRunning = isServiceRunning,
+                foregroundNotificationText = foregroundNotificationText,
+                onConnect = onConnect,
+                onDisconnect = onDisconnect
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            ActionsCard(onClearCounts = onClearCounts)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            AboutCard()
+
+            Spacer(modifier = Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+private fun FeedbackCard(
+    soundEnabled: Boolean,
+    vibrationEnabled: Boolean,
+    onSoundToggle: (Boolean) -> Unit,
+    onVibrationToggle: (Boolean) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            SectionTitle("反馈")
+            Spacer(modifier = Modifier.height(8.dp))
+
+            SettingSwitchRow(
+                label = "声音",
+                checked = soundEnabled,
+                onCheckedChange = onSoundToggle
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+            SettingSwitchRow(
+                label = "震动",
+                checked = vibrationEnabled,
+                onCheckedChange = onVibrationToggle
+            )
+        }
+    }
+}
+
+@Composable
+private fun NotificationCard(
+    notificationEnabled: Boolean,
+    notificationPermissionGranted: Boolean,
+    notificationDeliveryStatus: String,
+    onNotificationToggle: (Boolean) -> Unit,
+    onOpenNotificationSettings: () -> Unit,
+    onSendTestNotification: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
         ) {
             Spacer(Modifier.height(1.dp))
             PairingCard(
@@ -120,12 +255,47 @@ fun SettingsScreen(
             if (allowRelayOverride) {
                 DeveloperRelayCard(debugRelayOverride, onSaveDebugRelay)
             }
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("数据", fontWeight = FontWeight.Bold)
-                    Text("私钥、access token 和消息密钥由 Android Keystore 包装保护，不进入普通 DataStore 或备份。")
-                    OutlinedButton(onClick = onClearCounts) { Text("清空计数") }
-                }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "修改配置后，请断开并重新连接以生效",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+            Text(
+                text = if (BuildConfig.DEBUG) "Debug 可使用 ws://；正式版本仅允许 wss://" else "正式版本仅允许 wss:// 加密连接",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedButton(
+                onClick = {
+                    coroutineScope.launch {
+                        isSaving = true
+                        savedMessage = null
+                        try {
+                            if (onResetDefaults()) {
+                                localServerUrl = DEFAULT_SERVER_URL
+                                localRoomId = DEFAULT_ROOM_ID
+                                serverUrlError = null
+                                roomIdError = null
+                                savedMessage = "已恢复默认配置"
+                            } else {
+                                serverUrlError = "恢复默认配置失败，请稍后重试"
+                            }
+                        } finally {
+                            isSaving = false
+                        }
+                    }
+                },
+                enabled = !isSaving,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("恢复默认")
             }
             Text("版本 0.7.0 · 安全扫码配对协议 v1", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(24.dp))
@@ -149,13 +319,15 @@ private fun PairingCard(
     pairing: PairingUiState,
     storedPair: PairMetadata?,
     connectionState: ConnectionState,
-    onCreate: () -> Unit,
-    onScan: () -> Unit,
-    onCancel: () -> Unit,
-    onRegenerate: () -> Unit,
-    onConfirm: () -> Unit,
-    onReject: () -> Unit,
-    onRevoke: () -> Unit,
+    partnerOnline: Boolean,
+    wsEnabled: Boolean,
+    lastDisconnectReason: String,
+    lastDisconnectAtMillis: Long?,
+    isAppInForeground: Boolean,
+    isReconnecting: Boolean,
+    lastReconnectResult: String,
+    isServiceRunning: Boolean,
+    foregroundNotificationText: String,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
@@ -187,27 +359,62 @@ private fun PairingCard(
                         Button(onClick = onRegenerate) { Text("重新生成") }
                     }
                 }
-                PairingStage.WAITING_FOR_SAS, PairingStage.WAITING_FOR_PEER_CONFIRMATION -> {
-                    Text("安全码", style = MaterialTheme.typography.labelLarge)
-                    Text(pairing.sas.orEmpty(), style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold)
-                    Text("请通过当面或语音核对。只有双方都确认后才会保存长期配对。")
-                    if (pairing.stage == PairingStage.WAITING_FOR_SAS) {
-                        Button(onClick = onConfirm, enabled = !pairing.busy) { Text("代码一致") }
-                        OutlinedButton(onClick = onReject, enabled = !pairing.busy) { Text("代码不一致") }
-                    } else Text("已确认，等待对方确认…")
-                }
-                PairingStage.PAIRED -> {
-                    Text("已安全配对", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                    Text("对方设备：${storedPair?.peerDeviceName ?: pairing.peerName.orEmpty()}")
-                    Text("连接状态：${connectionLabel(connectionState)}")
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (connectionState == ConnectionState.CONNECTED) {
-                            OutlinedButton(onClick = onDisconnect) { Text("断开连接") }
-                        } else Button(onClick = onConnect) { Text("连接") }
-                        OutlinedButton(onClick = onRevoke) { Text("解除配对") }
-                    }
-                }
-                PairingStage.REVOKED -> Text("配对已撤销，请重新配对")
+            }
+
+            if (isReconnecting) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "断线自动重连中…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+            Text(
+                text = "连接诊断",
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            DiagnosticRow("WebSocket 状态", connectionDebugStateName(connectionState))
+            DiagnosticRow("对方在线", partnerOnline.toString())
+            DiagnosticRow("最近断开原因", lastDisconnectReason)
+            DiagnosticRow("最近断开时间", formatDisconnectTime(lastDisconnectAtMillis))
+            DiagnosticRow("App 前后台", if (isAppInForeground) "foreground" else "background")
+            DiagnosticRow("正在自动重连", isReconnecting.toString())
+            DiagnosticRow("最近重连结果", lastReconnectResult)
+            DiagnosticRow("Foreground Service", if (isServiceRunning) "running" else "stopped")
+            DiagnosticRow("常驻通知状态", foregroundNotificationText)
+        }
+    }
+}
+
+@Composable
+private fun ActionsCard(onClearCounts: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            SectionTitle("操作")
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = onClearCounts,
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error
+                ),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("清空本机计数（功德 + 收到提醒）")
             }
         }
     }
@@ -243,17 +450,33 @@ private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit)
 }
 
 @Composable
-private fun DeveloperRelayCard(current: String, onSave: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    var value by remember(current) { mutableStateOf(current) }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp)) {
-            TextButton(onClick = { expanded = !expanded }) { Text("开发者 / 高级设置") }
-            if (expanded) {
-                Text("仅 Debug 构建可覆盖 relay。二维码不会携带服务器地址。")
-                OutlinedTextField(value, { value = it }, label = { Text("调试 relay base URL") }, modifier = Modifier.fillMaxWidth())
-                Button(onClick = { onSave(value) }) { Text("保存调试地址") }
-            }
+private fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleMedium,
+        fontWeight = FontWeight.Bold
+    )
+}
+
+private fun validateServerUrl(serverUrl: String): String? {
+    if (serverUrl.isBlank()) return "服务器地址不能为空"
+    if (serverUrl.length > MAX_SERVER_URL_LENGTH) {
+        return "服务器地址不能超过 $MAX_SERVER_URL_LENGTH 个字符"
+    }
+
+    return try {
+        val uri = serverUrl.toUri()
+        val scheme = uri.scheme?.lowercase()
+        when {
+            scheme != "ws" && scheme != "wss" -> "必须以 ws:// 或 wss:// 开头"
+            !BuildConfig.DEBUG && scheme != "wss" -> "正式版本仅允许 wss://"
+            uri.host.isNullOrBlank() -> "服务器地址必须包含主机名或 IP"
+            !uri.encodedUserInfo.isNullOrEmpty() -> "服务器地址不能包含用户名或密码"
+            uri.fragment != null -> "服务器地址不能包含 #fragment"
+            !LocalDataStore.canStoreConnectionUrl(serverUrl) ->
+                "服务器地址不能包含 token、session、密码等敏感凭据"
+            uri.port == 0 || uri.port > 65535 -> "服务器端口必须为 1-65535"
+            else -> null
         }
     }
 }

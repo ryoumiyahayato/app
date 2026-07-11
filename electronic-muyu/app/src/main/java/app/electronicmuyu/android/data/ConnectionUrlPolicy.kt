@@ -1,5 +1,6 @@
 package app.electronicmuyu.android.data
 
+import app.electronicmuyu.android.BuildConfig
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -26,10 +27,15 @@ object ConnectionUrlPolicy {
     )
 
     fun isAllowedForPlainStorage(url: String): Boolean {
+        return isAllowedForPlainStorage(url, allowCleartext = BuildConfig.DEBUG)
+    }
+
+    internal fun isAllowedForPlainStorage(url: String, allowCleartext: Boolean): Boolean {
         return try {
             val uri = URI(url)
             val scheme = uri.scheme?.lowercase()
-            (scheme == "ws" || scheme == "wss") &&
+            val schemeAllowed = scheme == "wss" || (allowCleartext && scheme == "ws")
+            schemeAllowed &&
                 !uri.host.isNullOrBlank() &&
                 uri.rawUserInfo.isNullOrEmpty() &&
                 uri.rawFragment == null &&
