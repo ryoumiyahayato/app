@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: apply-pending-tap-queue
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply-and-verify:
@@ -49,24 +49,27 @@ jobs:
       - name: Set up Gradle cache
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Apply integration patch
-        run: python .github/scripts/apply-pending-tap-queue.py
+      - name: Apply integration patch and create a clean temporary commit
+        shell: pwsh
+        run: |
+          python .github/scripts/apply-pending-tap-queue.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add electronic-muyu/app/src/main/java/app/electronicmuyu/android/viewmodel/MainViewModel.kt
+          git add electronic-muyu/app/src/main/java/app/electronicmuyu/android/service/MuyuForegroundService.kt
+          git add electronic-muyu/SECURE_PAIRING_MANUAL_TEST.md
+          git diff --cached --check
+          git commit -m "fix: queue taps during short reconnects"
 
       - name: Verify electronic-muyu
         shell: pwsh
         working-directory: electronic-muyu
         run: .\verify-local.ps1
 
-      - name: Commit verified fix and remove one-time files
+      - name: Remove one-time files, amend verified commit, and push
         shell: pwsh
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git rm .github/scripts/apply-pending-tap-queue.py
           git rm .github/workflows/apply-pending-tap-queue.yml
-          git add electronic-muyu/app/src/main/java/app/electronicmuyu/android/viewmodel/MainViewModel.kt
-          git add electronic-muyu/app/src/main/java/app/electronicmuyu/android/service/MuyuForegroundService.kt
-          git add electronic-muyu/SECURE_PAIRING_MANUAL_TEST.md
-          git diff --cached --check
-          git commit -m "fix: queue taps during short reconnects"
+          git commit --amend --no-edit
           git push origin HEAD:main
