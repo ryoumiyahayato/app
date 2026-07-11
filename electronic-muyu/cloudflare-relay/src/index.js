@@ -1,4 +1,5 @@
-import { DurableObject } from "cloudflare:workers";
+import { errorResponse, jsonResponse, readStrictJson } from "./http.js";
+import { routeLegacy } from "./legacy.js";
 import {
   MAX_MESSAGE_BYTES,
   canonicalTap,
@@ -9,32 +10,31 @@ import {
   updateRateWindow
 } from "./protocol.js";
 
-const HEALTH_BODY = JSON.stringify({
+export { InvitationSession } from "./invitation.js";
+export { PairRoom } from "./legacy.js";
+export { RequestRateLimiter } from "./rate-limiter.js";
+export { SecurePair } from "./secure-pair.js";
+
+const HEALTH_BODY = Object.freeze({
   ok: true,
   service: "electronic-muyu-relay",
+  protocolVersion: 1,
   runtime: "cloudflare-workers-durable-objects"
 });
 const MAX_PENDING_AND_ACTIVE_SOCKETS = 6;
 const HELLO_TIMEOUT_MS = 5_000;
 
-function jsonResponse(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      "content-type": "application/json; charset=utf-8",
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-      "referrer-policy": "no-referrer"
-    }
-  });
-}
+const REQUEST_LIMITS = Object.freeze({
+  create: { limit: 10, windowMs: 60_000 },
+  join: { limit: 20, windowMs: 60_000 },
+  confirm: { limit: 120, windowMs: 60_000 },
+  cancel: { limit: 30, windowMs: 60_000 },
+  revoke: { limit: 30, windowMs: 60_000 }
+});
 
-function rejectedWebSocket(code, reason) {
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  server.accept();
-  server.close(code, reason);
-  return new Response(null, { status: 101, webSocket: client });
+async function networkHash(request) {
+  const address = request.headers.get("cf-connecting-ip") || "local-development";
+  return shortHash(address);
 }
 
 function safeClose(socket, code, reason) {
@@ -45,14 +45,11 @@ function safeClose(socket, code, reason) {
   }
 }
 
-async function shortHash(value) {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(value)
-  );
-  return Array.from(new Uint8Array(digest).slice(0, 4))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+async function validatedBody(request, validator) {
+  const parsed = await readStrictJson(request);
+  if (parsed.response) return parsed;
+  if (!validator(parsed.value)) return { response: errorResponse(400, "invalid_request") };
+  return parsed;
 }
 
 export default {
@@ -73,24 +70,47 @@ export default {
       return jsonResponse({ ok: false, error: "not_found" }, 404);
     }
 
-    const isWebSocket = request.method === "GET"
-      && request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-    if (!isWebSocket) {
-      return jsonResponse({ ok: false, error: "websocket_upgrade_required" }, 426);
-    }
+async function handleCreate(request, env, hash) {
+  if (request.method !== "POST") return errorResponse(405, "method_not_allowed");
+  if (!await enforceRequestLimit(env, "create", hash)) return errorResponse(429, "rate_limited");
+  const parsed = await validatedBody(request, isValidCreateInvite);
+  if (parsed.response) return parsed.response;
+  return forwardInvitation(env, parsed.value.inviteId, "create", parsed.value);
+}
 
-    const roomId = url.searchParams.get("room");
-    if (!isValidRoomId(roomId)) {
-      return rejectedWebSocket(4000, "valid room parameter required");
-    }
+async function handleInviteAction(request, env, hash, inviteId, action) {
+  if (request.method !== "POST") return errorResponse(405, "method_not_allowed");
+  if (!isOpaqueId(inviteId)) return errorResponse(404, "invite_not_found");
+  const operation = action === "join" ? "join" : action === "cancel" ? "cancel" : "confirm";
+  if (!await enforceRequestLimit(env, operation, hash)) return errorResponse(429, "rate_limited");
+  const validator = action === "join"
+    ? isValidJoinInvite
+    : action === "cancel"
+      ? isValidCancelInvite
+      : isValidConfirmInvite;
+  const parsed = await validatedBody(request, validator);
+  if (parsed.response) return parsed.response;
+  return forwardInvitation(env, inviteId, action, parsed.value);
+}
 
-    const requiredToken = typeof env.RELAY_TOKEN === "string" ? env.RELAY_TOKEN : "";
-    if (requiredToken.length > 0) {
-      const suppliedToken = url.searchParams.get("token") || "";
-      if (!constantTimeEqual(suppliedToken, requiredToken)) {
-        return rejectedWebSocket(4001, "invalid token");
-      }
-    }
+async function handleRevoke(request, env, hash, pairId, deviceId) {
+  if (request.method !== "DELETE") return errorResponse(405, "method_not_allowed");
+  if (!isOpaqueId(pairId) || !isOpaqueId(deviceId)) return errorResponse(404, "pair_not_found");
+  if (!await enforceRequestLimit(env, "revoke", hash)) return errorResponse(429, "rate_limited");
+  const parsed = await validatedBody(request, isValidRevokeDevice);
+  if (parsed.response) return parsed.response;
+  const object = env.PAIRS.get(env.PAIRS.idFromName(pairId));
+  return object.fetch("https://internal/revoke", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      pairId,
+      deviceId,
+      token: parsed.value.token,
+      now: Date.now()
+    })
+  });
+}
 
     return env.ROOMS.get(env.ROOMS.idFromName(roomId)).fetch(request);
   }
@@ -209,6 +229,8 @@ export class PairRoom extends DurableObject {
     });
     await this.schedulePendingCleanup(now + HELLO_TIMEOUT_MS);
 
+export default {
+  async fetch(request, env) {
     try {
       server.send(JSON.stringify({
         type: "hello_required",
@@ -245,12 +267,12 @@ export class PairRoom extends DurableObject {
       return;
     }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(message);
-    } catch {
-      return;
-    }
+      const inviteMatch = url.pathname.match(
+        /^\/v1\/invites\/([A-Za-z0-9_-]+)\/(join|confirm|cancel)$/u
+      );
+      if (inviteMatch) {
+        return handleInviteAction(request, env, hash, inviteMatch[1], inviteMatch[2]);
+      }
 
     if (!attachment.deviceId) {
       if (!isValidHello(parsed, attachment.roomId)) {
@@ -300,6 +322,10 @@ export class PairRoom extends DurableObject {
       } catch {
         safeClose(peer.socket, 1011, "forward failed");
       }
+      return errorResponse(404, "not_found");
+    } catch (error) {
+      console.error(`[relay] request_failed type=${error?.name || "Error"}`);
+      return errorResponse(500, "internal_error");
     }
   }
 

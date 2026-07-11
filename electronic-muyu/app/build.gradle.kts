@@ -4,6 +4,12 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val configuredRelayBaseUrl = providers.gradleProperty("ELECTRONIC_MUYU_RELAY_BASE_URL")
+    .orElse("https://relay.invalid")
+    .get()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 android {
     namespace = "app.electronicmuyu.android"
     compileSdk = 36
@@ -12,8 +18,10 @@ android {
         applicationId = "app.electronicmuyu.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.6.0"
+        versionCode = 2
+        versionName = "0.7.0"
+
+        buildConfigField("String", "RELAY_BASE_URL", "\"$configuredRelayBaseUrl\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -26,10 +34,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            buildConfigField("boolean", "ALLOW_RELAY_OVERRIDE", "false")
         }
         debug {
             isDebuggable = true
             // Debug logs are allowed but sensitive data must still be masked
+            buildConfigField("boolean", "ALLOW_RELAY_OVERRIDE", "true")
         }
     }
 
@@ -51,6 +61,13 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+
+    lint {
+        // AGP 8.10.1's bundled Compose detector reads at most Kotlin metadata 2.0,
+        // while Kotlin 2.0 emits metadata 2.1 and crashes the detector itself.
+        // Keep all other lint checks enabled; remove this once the toolchain detector is compatible.
+        disable += "StateFlowValueCalledInComposition"
     }
 }
 
@@ -82,6 +99,14 @@ dependencies {
 
     // OkHttp WebSocket
     implementation(libs.okhttp)
+
+    // Offline QR scanning and rendering. The ML Kit model is bundled in the APK.
+    implementation(libs.androidx.camera.core)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.mlkit.barcode.scanning)
+    implementation(libs.zxing.core)
 
     // Coroutines
     implementation(libs.kotlinx.coroutines.core)

@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/z-audit-issues-20260710
+      - feat/secure-qr-pairing-20260710
     paths:
       - "electronic-muyu/cloudflare-relay/**"
       - ".github/workflows/verify-cloudflare-relay.yml"
