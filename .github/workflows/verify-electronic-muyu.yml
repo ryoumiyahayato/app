@@ -42,7 +42,65 @@ jobs:
           set +e
           cat .github/agent-payload/part* > /tmp/audit-fixes.b64
           base64 --decode /tmp/audit-fixes.b64 | gzip --decompress > /tmp/apply_audit_fixes.py
-          sed -i 's#ROOT = Path(__file__).resolve().parents\[1\]#ROOT = Path.cwd()#' /tmp/apply_audit_fixes.py
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('/tmp/apply_audit_fixes.py')
+          source = path.read_text(encoding='utf-8')
+          source = source.replace(
+              "ROOT = Path(__file__).resolve().parents[1]",
+              "ROOT = Path.cwd()"
+          )
+          old_helper = '''def replace_once(relative, old, new):
+              path = ROOT / relative
+              text = path.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count < 1:
+                  raise RuntimeError(f'{relative}: expected a match, found none')
+              path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          '''
+          new_helper = '''def replace_once(relative, old, new):
+              path = ROOT / relative
+              text = path.read_text(encoding='utf-8')
+              if old in text:
+                  path.write_text(text.replace(old, new, 1), encoding='utf-8')
+                  return
+
+              old_lines = old.splitlines(keepends=True)
+              text_lines = text.splitlines(keepends=True)
+              for index in range(0, len(text_lines) - len(old_lines) + 1):
+                  candidate = text_lines[index:index + len(old_lines)]
+                  if not all(
+                      actual.rstrip('\\r\\n').lstrip(' \\t') == expected.rstrip('\\r\\n').lstrip(' \\t')
+                      for actual, expected in zip(candidate, old_lines)
+                  ):
+                      continue
+
+                  first_expected = next((line for line in old_lines if line.strip()), '')
+                  first_actual = next((line for line in candidate if line.strip()), '')
+                  expected_indent = len(first_expected) - len(first_expected.lstrip(' \\t'))
+                  actual_indent = len(first_actual) - len(first_actual.lstrip(' \\t'))
+                  delta = actual_indent - expected_indent
+                  adjusted = []
+                  for line in new.splitlines(keepends=True):
+                      if not line.strip():
+                          adjusted.append(line)
+                          continue
+                      if delta >= 0:
+                          adjusted.append((' ' * delta) + line)
+                      else:
+                          leading = len(line) - len(line.lstrip(' \\t'))
+                          adjusted.append(line[min(-delta, leading):])
+                  text_lines[index:index + len(old_lines)] = [''.join(adjusted)]
+                  path.write_text(''.join(text_lines), encoding='utf-8')
+                  return
+
+              raise RuntimeError(f'{relative}: expected a content match, found none')
+          '''
+          if old_helper not in source:
+              raise SystemExit('patch helper template not found')
+          path.write_text(source.replace(old_helper, new_helper, 1), encoding='utf-8')
+          PY
           python -m py_compile /tmp/apply_audit_fixes.py > /tmp/agent-apply.log 2>&1
           status=$?
           if [ "$status" -eq 0 ]; then
