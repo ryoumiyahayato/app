@@ -2,6 +2,7 @@ name: Verify electronic-muyu
 
 on:
   workflow_dispatch:
+  # Keep push verification enabled now that the repository is public.
   push:
     branches:
       - main
