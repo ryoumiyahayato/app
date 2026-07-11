@@ -279,7 +279,14 @@ wss.on('connection', (ws, req) => {
 
         if (!isValidTap(parsed, room, ws.deviceId)) return;
         const clients = rooms.get(room);
-        if (!clients || clients.size <= 1) return;
+        if (!clients || clients.get(ws.deviceId) !== ws) {
+            console.log(
+                `[relay] [${connId}] 忽略已被替换连接的 tap deviceId=${maskDeviceId(ws.deviceId)} `
+                + `roomHash=${roomHash}`
+            );
+            return;
+        }
+        if (clients.size <= 1) return;
 
         const payload = JSON.stringify({
             type: 'tap',
@@ -326,15 +333,34 @@ function shutdown(signal) {
     wss.clients.forEach((client) => {
         try { client.close(1001, 'server shutdown'); } catch (_) { client.terminate(); }
     });
+
     let finished = false;
-    const finish = () => {
+    let forceTimer;
+    const finish = (forceTerminate = false) => {
         if (finished) return;
         finished = true;
-        httpServer.close(() => process.exit(0));
+        if (forceTimer) clearTimeout(forceTimer);
+
+        if (forceTerminate) {
+            wss.clients.forEach((client) => {
+                try { client.terminate(); } catch (_) { /* already closed */ }
+            });
+        }
+
+        httpServer.close((err) => {
+            if (err && err.code !== 'ERR_SERVER_NOT_RUNNING') {
+                console.error('[relay] HTTP 关闭错误:', safeLogValue(err.message));
+                process.exit(1);
+                return;
+            }
+            console.log('[relay] 服务已关闭');
+            process.exit(0);
+        });
     };
-    const forceTimer = setTimeout(() => process.exit(1), 5_000);
+
+    forceTimer = setTimeout(() => finish(true), 5_000);
     forceTimer.unref();
-    wss.close(finish);
+    wss.close(() => finish(false));
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));
