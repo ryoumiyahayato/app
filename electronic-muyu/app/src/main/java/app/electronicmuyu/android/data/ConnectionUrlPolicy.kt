@@ -1,5 +1,6 @@
 package app.electronicmuyu.android.data
 
+import app.electronicmuyu.android.BuildConfig
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
@@ -29,7 +30,8 @@ object ConnectionUrlPolicy {
         return try {
             val uri = URI(url)
             val scheme = uri.scheme?.lowercase()
-            (scheme == "ws" || scheme == "wss") &&
+            val schemeAllowed = scheme == "wss" || (BuildConfig.DEBUG && scheme == "ws")
+            schemeAllowed &&
                 !uri.host.isNullOrBlank() &&
                 uri.rawUserInfo.isNullOrEmpty() &&
                 uri.rawFragment == null &&
