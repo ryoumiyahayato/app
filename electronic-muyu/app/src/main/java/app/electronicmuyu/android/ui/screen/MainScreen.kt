@@ -57,6 +57,7 @@ fun MainScreen(
     lastError: String,
     wsEnabled: Boolean,
     lastDisconnectReason: WebSocketClient.DisconnectReason,
+    partnerOnline: Boolean,
     onWoodfishTap: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
@@ -112,7 +113,7 @@ fun MainScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            ConnectionIndicator(state = connectionState)
+            ConnectionIndicator(state = connectionState, partnerOnline = partnerOnline)
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -143,14 +144,22 @@ fun MainScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             val hintText = when (connectionState) {
-                ConnectionState.CONNECTED -> "已连接 — 敲木鱼对方将收到提醒"
-                ConnectionState.CONNECTING -> "正在连接服务…"
-                ConnectionState.RECONNECTING -> "正在重连服务…"
+                ConnectionState.CONNECTED -> if (partnerOnline) {
+                    "已安全连接，对方在线 — 敲木鱼将实时发送提醒"
+                } else {
+                    "已安全连接，但对方离线 — 当前提醒不会补发"
+                }
+                ConnectionState.CONNECTING -> "正在建立安全连接…"
+                ConnectionState.AUTHENTICATING -> "正在认证已配对设备…"
+                ConnectionState.RECONNECTING -> "网络变化，正在安全重连…"
                 ConnectionState.DISCONNECTED -> when (lastDisconnectReason) {
                     WebSocketClient.DisconnectReason.NETWORK_ERROR,
-                    WebSocketClient.DisconnectReason.SERVER_CLOSED -> "连接已断开，可尝试重新连接"
+                    WebSocketClient.DisconnectReason.SERVER_CLOSED,
+                    WebSocketClient.DisconnectReason.RATE_LIMITED -> "连接已断开，正在等待或可手动重连"
                     else -> "未连接"
                 }
+                ConnectionState.REVOKED -> "安全配对已撤销"
+                ConnectionState.AUTHENTICATION_FAILED -> "设备认证失败，请重新配对"
                 else -> "未连接 — 点按木鱼仅增加本机功德"
             }
             Text(
@@ -236,10 +245,15 @@ private fun WoodfishButton(onTap: () -> Unit) {
 }
 
 @Composable
-private fun ConnectionIndicator(state: ConnectionState) {
+private fun ConnectionIndicator(state: ConnectionState, partnerOnline: Boolean) {
     val (label, color) = when (state) {
-        ConnectionState.CONNECTED -> "已连接" to Color(0xFF4CAF50)
+        ConnectionState.CONNECTED -> if (partnerOnline) {
+            "对方在线" to Color(0xFF4CAF50)
+        } else {
+            "对方离线" to Color(0xFFFF9800)
+        }
         ConnectionState.CONNECTING -> "连接中" to Color(0xFFFFC107)
+        ConnectionState.AUTHENTICATING -> "认证中" to Color(0xFFFFC107)
         ConnectionState.RECONNECTING -> "重连中" to Color(0xFFFFC107)
         ConnectionState.DISCONNECTED -> "未连接" to Color(0xFF9E9E9E)
         ConnectionState.UNPAIRED -> "未配对" to Color(0xFFFF9800)
@@ -248,7 +262,8 @@ private fun ConnectionIndicator(state: ConnectionState) {
         ConnectionState.PAIR_FAILED -> "配对失败" to Color(0xFFF44336)
         ConnectionState.CONNECTION_FAILED -> "连接失败" to Color(0xFFF44336)
         ConnectionState.PARTNER_OFFLINE -> "对方离线" to Color(0xFFFF9800)
-        else -> "安全连接" to Color(0xFFFFC107)
+        ConnectionState.AUTHENTICATION_FAILED -> "认证失败" to Color(0xFFF44336)
+        ConnectionState.REVOKED -> "配对已撤销" to Color(0xFFF44336)
     }
 
     Row(
