@@ -7,11 +7,39 @@ import org.junit.Test
 class ConnectionUrlPolicyTest {
 
     @Test
-    fun allowsWebSocketUrlsWithoutCredentials() {
-        assertTrue(ConnectionUrlPolicy.isAllowedForPlainStorage("ws://192.168.1.2:8443"))
+    fun allowsWebSocketUrlsWithoutCredentialsInDebugMode() {
         assertTrue(
             ConnectionUrlPolicy.isAllowedForPlainStorage(
-                "wss://relay.example.com/socket?transport=websocket"
+                "ws://192.168.1.2:8443",
+                allowCleartext = true
+            )
+        )
+        assertTrue(
+            ConnectionUrlPolicy.isAllowedForPlainStorage(
+                "wss://relay.example.com/socket?transport=websocket",
+                allowCleartext = true
+            )
+        )
+    }
+
+    @Test
+    fun releaseModeRejectsCleartextAndAllowsSecureWebSockets() {
+        assertFalse(
+            ConnectionUrlPolicy.isAllowedForPlainStorage(
+                "ws://192.168.1.2:8443",
+                allowCleartext = false
+            )
+        )
+        assertFalse(
+            ConnectionUrlPolicy.isAllowedForPlainStorage(
+                "ws://10.0.2.2:8443",
+                allowCleartext = false
+            )
+        )
+        assertTrue(
+            ConnectionUrlPolicy.isAllowedForPlainStorage(
+                "wss://relay.example.com/ws",
+                allowCleartext = false
             )
         )
     }
