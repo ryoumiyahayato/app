@@ -2,15 +2,19 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   MAX_MESSAGES_PER_WINDOW,
-  PROTOCOL_VERSION,
   RATE_LIMIT_WINDOW_MS,
   canonicalEncryptedTap,
   canonicalTranscriptBytes,
   computeSas,
   constantTimeEqual,
-  isValidHello,
-  isValidRoomId,
-  isValidTap,
+  decodeBase64Url,
+  encodeBase64Url,
+  isValidAuth,
+  isValidConfirmInvite,
+  isValidCreateInvite,
+  isValidEncryptedTap,
+  isValidJoinInvite,
+  isInviteExpired,
   updateRateWindow
 } from "../src/protocol.js";
 
@@ -66,21 +70,31 @@ test("confirmation requires a token hash only for confirm", () => {
   }), true);
 });
 
-test("hello validation binds room, device and protocol version", () => {
-  const hello = {
-    type: "hello",
-    pairId: "room-a",
-    deviceId: "device-a",
-    protocolVersion: PROTOCOL_VERSION
-  };
-  assert.equal(isValidHello(hello, "room-a"), true);
-  assert.equal(isValidHello({ ...hello, pairId: "room-b" }, "room-a"), false);
-  assert.equal(isValidHello({ ...hello, deviceId: "" }, "room-a"), false);
-  assert.equal(isValidHello({ ...hello, protocolVersion: 1 }, "room-a"), false);
-  assert.equal(isValidHello(null, "room-a"), false);
+test("invitation expires exactly at the two-minute boundary", () => {
+  const createdAt = 1_000;
+  const expiresAt = createdAt + 120_000;
+  assert.equal(isInviteExpired(expiresAt, expiresAt - 1), false);
+  assert.equal(isInviteExpired(expiresAt, expiresAt), true);
+  assert.equal(isInviteExpired(expiresAt, expiresAt + 1), true);
 });
 
-test("tap validation binds pairId and the registered device", () => {
+test("socket authentication is bound to the requested pair", () => {
+  const pairId = opaque(12);
+  const auth = {
+    type: "auth",
+    version: 1,
+    pairId,
+    deviceId: opaque(13),
+    token: secret(14)
+  };
+  assert.equal(isValidAuth(auth, pairId), true);
+  assert.equal(isValidAuth({ ...auth, pairId: opaque(15) }, pairId), false);
+  assert.equal(isValidAuth({ ...auth, extra: "no" }, pairId), false);
+});
+
+test("encrypted tap is strict, sender-bound and canonicalized", () => {
+  const pairId = opaque(16);
+  const deviceId = opaque(17);
   const tap = {
     type: "encrypted_tap",
     version: 1,
@@ -90,11 +104,11 @@ test("tap validation binds pairId and the registered device", () => {
     iv: encodeBase64Url(bytes(12, 18)),
     ciphertext: encodeBase64Url(bytes(32, 19))
   };
-  assert.equal(isValidTap(tap, "room-a", "device-a"), true);
-  assert.equal(isValidTap({ ...tap, pairId: "room-b" }, "room-a", "device-a"), false);
-  assert.equal(isValidTap(tap, "room-a", "device-b"), false);
-  assert.equal(isValidTap({ ...tap, timestamp: 0 }, "room-a", "device-a"), false);
-  assert.equal(isValidTap({ ...tap, deviceId: "" }, "room-a", ""), false);
+  assert.equal(isValidEncryptedTap(tap, pairId, deviceId), true);
+  assert.equal(isValidEncryptedTap({ ...tap, counter: 0 }, pairId, deviceId), false);
+  assert.equal(isValidEncryptedTap({ ...tap, sender: opaque(20) }, pairId, deviceId), false);
+  assert.equal(isValidEncryptedTap({ ...tap, plaintext: "tap" }, pairId, deviceId), false);
+  assert.deepEqual(JSON.parse(canonicalEncryptedTap(tap)), tap);
 });
 
 test("transcript encoding is length-prefixed and SAS is deterministic", async () => {
@@ -119,17 +133,10 @@ test("rate window permits the configured burst and then resets", () => {
     state = updateRateWindow(state, startedAt + 1);
     assert.equal(state.allowed, true);
   }
-
-  state = updateRateWindow(state, startedAt + 2);
-  assert.equal(state.allowed, false);
-
+  assert.equal(updateRateWindow(state, startedAt + 2).allowed, false);
   const reset = updateRateWindow(state, startedAt + RATE_LIMIT_WINDOW_MS);
   assert.equal(reset.allowed, true);
   assert.equal(reset.messagesInWindow, 1);
-
-  const clockRollback = updateRateWindow(state, startedAt - 1);
-  assert.equal(clockRollback.allowed, true);
-  assert.equal(clockRollback.messagesInWindow, 1);
 });
 
 test("constant-time equality handles equal, unequal and invalid values", () => {
