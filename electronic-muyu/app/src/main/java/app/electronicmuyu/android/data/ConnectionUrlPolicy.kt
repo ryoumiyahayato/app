@@ -27,10 +27,14 @@ object ConnectionUrlPolicy {
     )
 
     fun isAllowedForPlainStorage(url: String): Boolean {
+        return isAllowedForPlainStorage(url, allowCleartext = BuildConfig.DEBUG)
+    }
+
+    internal fun isAllowedForPlainStorage(url: String, allowCleartext: Boolean): Boolean {
         return try {
             val uri = URI(url)
             val scheme = uri.scheme?.lowercase()
-            val schemeAllowed = scheme == "wss" || (BuildConfig.DEBUG && scheme == "ws")
+            val schemeAllowed = scheme == "wss" || (allowCleartext && scheme == "ws")
             schemeAllowed &&
                 !uri.host.isNullOrBlank() &&
                 uri.rawUserInfo.isNullOrEmpty() &&
