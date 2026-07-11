@@ -1,0 +1,72 @@
+name: Apply pending tap queue fix
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/scripts/apply-pending-tap-queue.py"
+      - ".github/workflows/apply-pending-tap-queue.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-pending-tap-queue
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: electronic-muyu/server/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        shell: pwsh
+        run: sdkmanager.bat 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Apply integration patch
+        run: python .github/scripts/apply-pending-tap-queue.py
+
+      - name: Verify electronic-muyu
+        shell: pwsh
+        working-directory: electronic-muyu
+        run: .\verify-local.ps1
+
+      - name: Commit verified fix and remove one-time files
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/scripts/apply-pending-tap-queue.py
+          git rm .github/workflows/apply-pending-tap-queue.yml
+          git add electronic-muyu/app/src/main/java/app/electronicmuyu/android/viewmodel/MainViewModel.kt
+          git add electronic-muyu/app/src/main/java/app/electronicmuyu/android/service/MuyuForegroundService.kt
+          git add electronic-muyu/SECURE_PAIRING_MANUAL_TEST.md
+          git diff --cached --check
+          git commit -m "fix: queue taps during short reconnects"
+          git push origin HEAD:main
