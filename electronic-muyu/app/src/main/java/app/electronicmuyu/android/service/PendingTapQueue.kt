@@ -1,5 +1,6 @@
 package app.electronicmuyu.android.service
 
+import app.electronicmuyu.android.model.ConnectionState
 import java.util.ArrayDeque
 
 internal data class PendingTap(
@@ -16,6 +17,11 @@ internal data class PendingTapPollResult(
     val tap: PendingTap?,
     val expiredCount: Int
 )
+
+internal fun shouldFlushPendingTaps(
+    connectionState: ConnectionState,
+    partnerOnline: Boolean
+): Boolean = connectionState == ConnectionState.CONNECTED && partnerOnline
 
 /**
  * A process-memory-only queue used to bridge short WebSocket reconnect windows.
