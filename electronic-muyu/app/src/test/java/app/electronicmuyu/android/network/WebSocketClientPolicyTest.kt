@@ -3,6 +3,7 @@ package app.electronicmuyu.android.network
 import app.electronicmuyu.android.network.WebSocketClient.DisconnectReason
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -26,10 +27,6 @@ class WebSocketClientPolicyTest {
             assertEquals(DisconnectReason.SERVER_REJECTED, reason)
             assertFalse(WebSocketClient.shouldReconnect(reason))
         }
-
-        val rateLimited = WebSocketClient.disconnectReasonForCloseCode(4408)
-        assertEquals(DisconnectReason.RATE_LIMITED, rateLimited)
-        assertFalse(WebSocketClient.shouldReconnect(rateLimited))
     }
 
     @Test
@@ -57,12 +54,42 @@ class WebSocketClientPolicyTest {
     }
 
     @Test
-    fun restartAndNetworkFailuresRemainRetryable() {
+    fun rateLimitRestartAndNetworkFailuresRemainRetryable() {
+        val rateLimited = WebSocketClient.disconnectReasonForCloseCode(4408)
         val restarting = WebSocketClient.disconnectReasonForCloseCode(1012)
 
+        assertEquals(DisconnectReason.RATE_LIMITED, rateLimited)
+        assertTrue(WebSocketClient.shouldReconnect(rateLimited))
         assertEquals(DisconnectReason.SERVER_CLOSED, restarting)
         assertTrue(WebSocketClient.shouldReconnect(restarting))
         assertTrue(WebSocketClient.shouldReconnect(DisconnectReason.NETWORK_ERROR))
         assertFalse(WebSocketClient.shouldReconnect(DisconnectReason.USER_ACTION))
+    }
+
+    @Test
+    fun peerStateRequiresExactVersionedPayload() {
+        assertEquals(
+            true,
+            WebSocketClient.peerOnlineFromMessage(
+                """{"type":"peer_state","version":1,"peerOnline":true,"timestamp":123}"""
+            )
+        )
+        assertEquals(
+            false,
+            WebSocketClient.peerOnlineFromMessage(
+                """{"type":"peer_state","version":1,"peerOnline":false,"timestamp":123}"""
+            )
+        )
+        assertNull(
+            WebSocketClient.peerOnlineFromMessage(
+                """{"type":"peer_state","version":1,"peerOnline":true,"timestamp":123,"extra":1}"""
+            )
+        )
+        assertNull(
+            WebSocketClient.peerOnlineFromMessage(
+                """{"type":"peer_state","version":2,"peerOnline":true,"timestamp":123}"""
+            )
+        )
+        assertNull(WebSocketClient.peerOnlineFromMessage("not-json"))
     }
 }
