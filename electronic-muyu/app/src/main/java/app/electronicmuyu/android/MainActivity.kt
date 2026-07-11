@@ -77,8 +77,9 @@ fun MuyuApp(onRequestNotificationPermission: ((Boolean) -> Unit) -> Unit = {}) {
     val connectionState by viewModel.connectionState.collectAsState()
     val lastReceivedEvent by viewModel.lastReceivedEvent.collectAsState()
     val lastError by viewModel.lastError.collectAsState()
-    val partnerOnline by viewModel.partnerOnline.collectAsState()
-    val wsEnabled by viewModel.wsEnabled.collectAsState()
+    val serviceRunning by viewModel.isServiceRunning.collectAsState()
+    val soundEnabled by viewModel.soundEnabled.collectAsState()
+    val vibrationEnabled by viewModel.vibrationEnabled.collectAsState()
     val notificationEnabled by viewModel.notificationEnabled.collectAsState()
     val pairing by viewModel.pairingUiState.collectAsState()
     val storedPair by viewModel.storedPair.collectAsState()
@@ -106,12 +107,13 @@ fun MuyuApp(onRequestNotificationPermission: ((Boolean) -> Unit) -> Unit = {}) {
                 connectionState = connectionState,
                 lastReceivedEvent = lastReceivedEvent,
                 lastError = lastError,
-                wsEnabled = wsEnabled,
-                lastDisconnectReason = lastDisconnectReason,
-                partnerOnline = partnerOnline,
-                onWoodfishTap = { viewModel.onTap() },
-                onConnect = { viewModel.startConnection() },
-                onDisconnect = { viewModel.stopConnection() },
+                wsEnabled = serviceRunning,
+                lastDisconnectReason = viewModel.lastDisconnectReason.collectAsState().value,
+                onWoodfishTap = viewModel::onTap,
+                onConnect = {
+                    if (storedPair == null) navController.navigate("settings") else viewModel.startConnection()
+                },
+                onDisconnect = viewModel::stopConnection,
                 onNavigateToSettings = { navController.navigate("settings") },
                 onReceivedEventShown = viewModel::dismissReceivedEvent
             )
@@ -123,20 +125,13 @@ fun MuyuApp(onRequestNotificationPermission: ((Boolean) -> Unit) -> Unit = {}) {
                 notificationEnabled = notificationEnabled,
                 notificationPermissionGranted = notificationPermission,
                 connectionState = connectionState,
-                partnerOnline = partnerOnline,
-                wsEnabled = wsEnabled,
-                lastDisconnectReason = lastDisconnectReason.label,
-                lastDisconnectAtMillis = lastDisconnectAtMillis,
-                isAppInForeground = isAppInForeground,
-                isReconnecting = isReconnecting,
-                lastReconnectResult = lastReconnectResult,
-                isServiceRunning = isServiceRunning,
-                foregroundNotificationText = foregroundNotificationText,
-                serverUrl = serverUrl,
-                roomId = roomId,
-                deviceIdDisplay = deviceIdDisplay,
-                onSoundToggle = { viewModel.setSoundEnabled(it) },
-                onVibrationToggle = { viewModel.setVibrationEnabled(it) },
+                pairing = pairing,
+                storedPair = storedPair,
+                allowRelayOverride = viewModel.allowRelayOverride,
+                debugRelayOverride = debugRelay,
+                lastError = lastError,
+                onSoundToggle = viewModel::setSoundEnabled,
+                onVibrationToggle = viewModel::setVibrationEnabled,
                 onNotificationToggle = { enabled ->
                     if (!enabled || NotificationHelper.hasNotificationPermission(context)) {
                         viewModel.setNotificationEnabled(enabled)
