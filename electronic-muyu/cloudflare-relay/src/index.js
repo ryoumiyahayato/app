@@ -1,13 +1,13 @@
 import { errorResponse, jsonResponse, readStrictJson } from "./http.js";
 import { routeLegacy } from "./legacy.js";
 import {
-  MAX_MESSAGE_BYTES,
-  canonicalTap,
-  constantTimeEqual,
-  isValidHello,
-  isValidRoomId,
-  isValidTap,
-  updateRateWindow
+  isOpaqueId,
+  isValidCancelInvite,
+  isValidConfirmInvite,
+  isValidCreateInvite,
+  isValidJoinInvite,
+  isValidRevokeDevice,
+  shortHash
 } from "./protocol.js";
 
 export { InvitationSession } from "./invitation.js";
@@ -21,8 +21,6 @@ const HEALTH_BODY = Object.freeze({
   protocolVersion: 1,
   runtime: "cloudflare-workers-durable-objects"
 });
-const MAX_PENDING_AND_ACTIVE_SOCKETS = 6;
-const HELLO_TIMEOUT_MS = 5_000;
 
 const REQUEST_LIMITS = Object.freeze({
   create: { limit: 10, windowMs: 60_000 },
@@ -37,12 +35,16 @@ async function networkHash(request) {
   return shortHash(address);
 }
 
-function safeClose(socket, code, reason) {
-  try {
-    socket.close(code, reason);
-  } catch {
-    // The socket may already be closing or closed.
-  }
+async function enforceRequestLimit(env, operation, hash) {
+  const policy = REQUEST_LIMITS[operation];
+  const id = env.RATE_LIMITS.idFromName(`${operation}:${hash}`);
+  const response = await env.RATE_LIMITS.get(id).fetch("https://internal/consume", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ now: Date.now(), ...policy })
+  });
+  if (!response.ok) return false;
+  return (await response.json()).allowed === true;
 }
 
 async function validatedBody(request, validator) {
@@ -52,23 +54,14 @@ async function validatedBody(request, validator) {
   return parsed;
 }
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (request.method === "GET" && url.pathname === "/health") {
-      return new Response(HEALTH_BODY, {
-        status: 200,
-        headers: {
-          "content-type": "application/json; charset=utf-8",
-          "cache-control": "no-store",
-          "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer"
-        }
-      });
-    }
-    if (url.pathname !== "/" && url.pathname !== "/ws") {
-      return jsonResponse({ ok: false, error: "not_found" }, 404);
-    }
+async function forwardInvitation(env, inviteId, action, body) {
+  const object = env.INVITATIONS.get(env.INVITATIONS.idFromName(inviteId));
+  return object.fetch(`https://internal/${action}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...body, now: Date.now() })
+  });
+}
 
 async function handleCreate(request, env, hash) {
   if (request.method !== "POST") return errorResponse(405, "method_not_allowed");
@@ -112,160 +105,42 @@ async function handleRevoke(request, env, hash, pairId, deviceId) {
   });
 }
 
-    return env.ROOMS.get(env.ROOMS.idFromName(roomId)).fetch(request);
-  }
-};
-
-export class PairRoom extends DurableObject {
-  activeSockets() {
-    return this.ctx.getWebSockets().filter((socket) => socket.readyState === 1);
-  }
-
-  attachment(socket) {
-    return socket.deserializeAttachment() || null;
-  }
-
-  socketEntries(excludedSocket = null) {
-    return this.activeSockets()
-      .filter((socket) => socket !== excludedSocket)
-      .map((socket) => ({ socket, attachment: this.attachment(socket) }))
-      .filter(({ attachment }) => attachment && isValidRoomId(attachment.roomId));
+async function handleSocket(request, env, url, hash) {
+  const isUpgrade = request.method === "GET"
+    && request.headers.get("upgrade")?.toLowerCase() === "websocket";
+  const queryKeys = [...url.searchParams.keys()];
+  const pairId = url.searchParams.get("pair");
+  if (!isUpgrade
+    || queryKeys.length !== 1
+    || queryKeys[0] !== "pair"
+    || url.searchParams.getAll("pair").length !== 1
+    || !isOpaqueId(pairId)) {
+    return errorResponse(400, "invalid_socket_request");
   }
 
-  latestRegisteredEntries(excludedSocket = null) {
-    const byDeviceId = new Map();
-    for (const entry of this.socketEntries(excludedSocket)) {
-      const deviceId = entry.attachment.deviceId;
-      if (!deviceId) continue;
-      const existing = byDeviceId.get(deviceId);
-      const joinedAt = Number(entry.attachment.joinedAt) || 0;
-      const existingJoinedAt = Number(existing?.attachment.joinedAt) || 0;
-      if (!existing || joinedAt >= existingJoinedAt) {
-        byDeviceId.set(deviceId, entry);
-      }
-    }
-    return [...byDeviceId.values()];
-  }
-
-  expirePendingSockets(now = Date.now()) {
-    let nextDeadline = null;
-    for (const entry of this.socketEntries()) {
-      if (entry.attachment.deviceId) continue;
-      const joinedAt = Number(entry.attachment.joinedAt) || now;
-      const deadline = joinedAt + HELLO_TIMEOUT_MS;
-      if (deadline <= now) {
-        safeClose(entry.socket, 4004, "hello timeout");
-      } else if (nextDeadline === null || deadline < nextDeadline) {
-        nextDeadline = deadline;
-      }
-    }
-    return nextDeadline;
-  }
-
-  async schedulePendingCleanup(nextDeadline = null) {
-    const deadline = nextDeadline ?? this.expirePendingSockets();
-    const currentAlarm = await this.ctx.storage.getAlarm();
-    if (deadline === null) {
-      if (currentAlarm !== null) await this.ctx.storage.deleteAlarm();
-      return;
-    }
-    if (currentAlarm === null || deadline < currentAlarm) {
-      await this.ctx.storage.setAlarm(deadline);
-    }
-  }
-
-  broadcastRoomState(roomId) {
-    const registered = this.latestRegisteredEntries();
-    const now = Date.now();
-    for (const entry of registered) {
-      const peerOnline = registered.some(
-        (candidate) => candidate.attachment.deviceId !== entry.attachment.deviceId
-      );
-      try {
-        entry.socket.send(JSON.stringify({
-          type: "room_state",
-          pairId: roomId,
-          peerOnline,
-          connections: registered.length,
-          timestamp: now
-        }));
-      } catch {
-        safeClose(entry.socket, 1011, "room_state send failed");
-      }
-    }
-  }
-
-  async fetch(request) {
-    const url = new URL(request.url);
-    const roomId = url.searchParams.get("room");
-    const isWebSocket = request.method === "GET"
-      && request.headers.get("Upgrade")?.toLowerCase() === "websocket";
-    if (!isWebSocket || !isValidRoomId(roomId)) {
-      return jsonResponse({ ok: false, error: "invalid_room_request" }, 400);
-    }
-
-    const now = Date.now();
-    const nextDeadline = this.expirePendingSockets(now);
-    const countableSockets = this.socketEntries().filter(({ attachment }) => {
-      return Boolean(attachment.deviceId)
-        || (Number(attachment.joinedAt) || now) + HELLO_TIMEOUT_MS > now;
-    });
-    if (countableSockets.length >= MAX_PENDING_AND_ACTIVE_SOCKETS) {
-      await this.schedulePendingCleanup(nextDeadline);
-      return rejectedWebSocket(4003, "room handshake capacity reached");
-    }
-
-    const pair = new WebSocketPair();
-    const [client, server] = Object.values(pair);
-    const roomHash = await shortHash(roomId);
-    this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({
-      roomId,
-      roomHash,
-      deviceId: null,
-      joinedAt: now,
-      windowStartedAt: now,
-      messagesInWindow: 0
-    });
-    await this.schedulePendingCleanup(now + HELLO_TIMEOUT_MS);
+  const object = env.PAIRS.get(env.PAIRS.idFromName(pairId));
+  const headers = new Headers(request.headers);
+  headers.set("x-electronic-muyu-network", hash);
+  headers.delete("cf-connecting-ip");
+  const internalRequest = new Request(`https://internal/socket?pair=${encodeURIComponent(pairId)}`, {
+    method: "GET",
+    headers
+  });
+  return object.fetch(internalRequest);
+}
 
 export default {
   async fetch(request, env) {
     try {
-      server.send(JSON.stringify({
-        type: "hello_required",
-        protocolVersion: 2,
-        timestamp: now
-      }));
-    } catch {
-      safeClose(server, 1011, "hello_required send failed");
-    }
-    return new Response(null, { status: 101, webSocket: client });
-  }
+      const url = new URL(request.url);
+      const hash = await networkHash(request);
 
-  async webSocketMessage(socket, message) {
-    const attachment = this.attachment(socket);
-    if (!attachment || !isValidRoomId(attachment.roomId)) {
-      safeClose(socket, 1011, "missing connection state");
-      return;
-    }
-    if (typeof message !== "string") {
-      safeClose(socket, 1003, "text messages only");
-      return;
-    }
-    if (new TextEncoder().encode(message).byteLength > MAX_MESSAGE_BYTES) {
-      safeClose(socket, 1009, "message too large");
-      return;
-    }
-
-    const rateState = updateRateWindow(attachment, Date.now());
-    attachment.windowStartedAt = rateState.windowStartedAt;
-    attachment.messagesInWindow = rateState.messagesInWindow;
-    socket.serializeAttachment(attachment);
-    if (!rateState.allowed) {
-      safeClose(socket, 4008, "rate limit exceeded");
-      return;
-    }
+      if (url.pathname === "/health") {
+        return request.method === "GET"
+          ? jsonResponse(HEALTH_BODY)
+          : errorResponse(405, "method_not_allowed");
+      }
+      if (url.pathname === "/v1/invites") return handleCreate(request, env, hash);
 
       const inviteMatch = url.pathname.match(
         /^\/v1\/invites\/([A-Za-z0-9_-]+)\/(join|confirm|cancel)$/u
@@ -274,53 +149,18 @@ export default {
         return handleInviteAction(request, env, hash, inviteMatch[1], inviteMatch[2]);
       }
 
-    if (!attachment.deviceId) {
-      if (!isValidHello(parsed, attachment.roomId)) {
-        safeClose(socket, 4004, "hello required");
-        return;
-      }
-
-      const registered = this.socketEntries(socket)
-        .filter((entry) => entry.attachment.deviceId);
-      const sameDeviceEntries = registered.filter(
-        (entry) => entry.attachment.deviceId === parsed.deviceId
+      const revokeMatch = url.pathname.match(
+        /^\/v1\/pairs\/([A-Za-z0-9_-]+)\/devices\/([A-Za-z0-9_-]+)$/u
       );
-      const distinctDeviceIds = new Set(
-        registered.map((entry) => entry.attachment.deviceId)
-      );
-      if (sameDeviceEntries.length === 0 && distinctDeviceIds.size >= 2) {
-        safeClose(socket, 4002, "room is full");
-        return;
+      if (revokeMatch) {
+        return handleRevoke(request, env, hash, revokeMatch[1], revokeMatch[2]);
       }
 
-      attachment.deviceId = parsed.deviceId;
-      socket.serializeAttachment(attachment);
-      for (const existing of sameDeviceEntries) {
-        safeClose(existing.socket, 4004, "replaced by newer connection");
-      }
-      await this.schedulePendingCleanup();
-      this.broadcastRoomState(attachment.roomId);
-      return;
-    }
+      if (url.pathname === "/v1/socket") return handleSocket(request, env, url, hash);
 
-    if (!isValidTap(parsed, attachment.roomId, attachment.deviceId)) return;
-
-    const registered = this.latestRegisteredEntries();
-    const currentSender = registered.find(
-      (entry) => entry.attachment.deviceId === attachment.deviceId
-    );
-    if (!currentSender || currentSender.socket !== socket) {
-      // A stale socket may briefly remain open while its replacement closes it.
-      return;
-    }
-
-    const payload = canonicalTap(parsed);
-    for (const peer of registered) {
-      if (peer.attachment.deviceId === attachment.deviceId) continue;
-      try {
-        peer.socket.send(payload);
-      } catch {
-        safeClose(peer.socket, 1011, "forward failed");
+      const legacyRequested = url.pathname === "/" || url.pathname === "/ws";
+      if (legacyRequested && String(env.ALLOW_LEGACY).toLowerCase() === "true") {
+        return routeLegacy(request, env, url);
       }
       return errorResponse(404, "not_found");
     } catch (error) {
@@ -328,22 +168,4 @@ export default {
       return errorResponse(500, "internal_error");
     }
   }
-
-  async webSocketClose(socket, code, _reason, wasClean) {
-    const attachment = this.attachment(socket);
-    console.log(`[relay] disconnected code=${code} clean=${wasClean}`);
-    await this.schedulePendingCleanup();
-    if (attachment?.roomId) this.broadcastRoomState(attachment.roomId);
-  }
-
-  webSocketError(socket) {
-    safeClose(socket, 1011, "websocket error");
-  }
-
-  async alarm() {
-    const nextDeadline = this.expirePendingSockets(Date.now());
-    if (nextDeadline !== null) {
-      await this.ctx.storage.setAlarm(nextDeadline);
-    }
-  }
-}
+};
