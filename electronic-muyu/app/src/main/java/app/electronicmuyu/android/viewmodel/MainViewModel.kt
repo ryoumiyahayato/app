@@ -141,7 +141,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     events.forEach { event ->
                         if (now - event.receivedAtMillis in 0L..10_000L) {
                             _lastReceivedEvent.value = event.id
-                            playSoundAndVibrate()
+                            playRemoteFeedback()
                         }
                     }
                 } finally {
@@ -338,8 +338,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 MuyuConnectionRepository.setLastError("调试 relay 必须是 HTTPS，或本机/模拟器回环 HTTP")
                 return@launch
             }
-            dataStore.setDebugRelayOverride(normalized.ifEmpty { null })
-            _debugRelayOverride.value = normalized
+            try {
+                dataStore.setDebugRelayOverride(normalized.ifEmpty { null })
+                _debugRelayOverride.value = normalized
+                MuyuConnectionRepository.setLastError("")
+            } catch (_: Exception) {
+                MuyuConnectionRepository.setLastError("调试 relay 地址保存失败")
+            }
         }
     }
 
@@ -404,9 +409,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun clearAllCounts() = viewModelScope.launch {
-        dataStore.clearAllCounts()
-        MuyuConnectionRepository.clearPendingReceivedTapUiEvents()
-        _lastReceivedEvent.value = null
+        try {
+            dataStore.clearAllCounts()
+            MuyuConnectionRepository.clearPendingReceivedTapUiEvents()
+            _lastReceivedEvent.value = null
+        } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("计数清空失败")
+        }
     }
     fun dismissReceivedEvent() { _lastReceivedEvent.value = null }
     fun checkNotificationPermissionState(): Boolean = NotificationHelper.hasNotificationPermission(getApplication())
@@ -543,6 +552,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         pollingJob?.cancel()
         pollingJob = null
         pending = null
+    }
+    private fun playRemoteFeedback() {
+        if (_soundEnabled.value) soundManager.playNotificationTap()
+        if (_vibrationEnabled.value) vibrationManager.notificationVibrate()
     }
     private fun playSoundAndVibrate() {
         if (_soundEnabled.value) soundManager.playMuyuHit()
