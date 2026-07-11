@@ -34,6 +34,7 @@ class MuyuForegroundService : Service() {
     private var currentDeviceId = ""
     private var stopReason: WebSocketClient.DisconnectReason? = null
     private var foregroundStarted = false
+    private var activeStartId = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -59,6 +60,14 @@ class MuyuForegroundService : Service() {
         serviceScope.launch {
             wsClient.lastError.collectLatest { error ->
                 MuyuConnectionRepository.setLastError(error)
+            }
+        }
+        serviceScope.launch {
+            wsClient.partnerOnline.collectLatest { isOnline ->
+                MuyuConnectionRepository.setPartnerOnline(isOnline)
+                if (foregroundStarted) {
+                    updateForegroundNotification(wsClient.connectionState.value)
+                }
             }
         }
         serviceScope.launch {
@@ -93,6 +102,7 @@ class MuyuForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        activeStartId = maxOf(activeStartId, startId)
         when (intent?.action) {
             ACTION_START_CONNECT -> {
                 readConnectionExtras(intent)
@@ -118,7 +128,7 @@ class MuyuForegroundService : Service() {
                         System.currentTimeMillis()
                     )
                     stopReason = WebSocketClient.DisconnectReason.SERVICE_START_FAILED
-                    stopSelf(startId)
+                    stopSelfResult(startId)
                     return START_NOT_STICKY
                 }
                 foregroundStarted = true
@@ -139,11 +149,14 @@ class MuyuForegroundService : Service() {
                     }
                 } else {
                     Log.d(TAG, "send tap ignored: service is not connected")
+                    if (!foregroundStarted) {
+                        stopSelfResult(startId)
+                    }
                 }
             }
 
             ACTION_DISCONNECT -> {
-                disconnectAndStop(WebSocketClient.DisconnectReason.USER_ACTION)
+                disconnectAndStop(WebSocketClient.DisconnectReason.USER_ACTION, startId)
             }
 
             ACTION_REFRESH_NOTIFICATION -> {
@@ -154,7 +167,7 @@ class MuyuForegroundService : Service() {
 
             else -> {
                 Log.d(TAG, "service started without a supported action; stopping")
-                stopSelf(startId)
+                stopSelfResult(startId)
             }
         }
         return START_NOT_STICKY
@@ -168,6 +181,7 @@ class MuyuForegroundService : Service() {
         foregroundStarted = false
         MuyuConnectionRepository.setServiceRunning(false)
         MuyuConnectionRepository.setReconnecting(false)
+        MuyuConnectionRepository.setPartnerOnline(false)
         MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
         MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
         serviceScope.cancel()
@@ -176,7 +190,7 @@ class MuyuForegroundService : Service() {
 
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.d(TAG, "foreground service timeout startId=$startId type=$fgsType")
-        disconnectAndStop(WebSocketClient.DisconnectReason.SERVICE_TIMEOUT)
+        disconnectAndStop(WebSocketClient.DisconnectReason.SERVICE_TIMEOUT, startId)
     }
 
     private fun readConnectionExtras(intent: Intent) {
@@ -246,25 +260,28 @@ class MuyuForegroundService : Service() {
         }
     }
 
-    private fun disconnectAndStop(reason: WebSocketClient.DisconnectReason) {
+    private fun disconnectAndStop(
+        reason: WebSocketClient.DisconnectReason,
+        startId: Int = activeStartId
+    ) {
         if (stopReason != null) return
         stopReason = reason
         wsClient.disconnect(reason)
         MuyuConnectionRepository.setServiceRunning(false)
         MuyuConnectionRepository.setReconnecting(false)
+        MuyuConnectionRepository.setPartnerOnline(false)
         MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
         MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
         if (foregroundStarted) {
             stopForeground(STOP_FOREGROUND_REMOVE)
             foregroundStarted = false
         }
-        stopSelf()
+        stopSelfResult(startId)
     }
 
     private fun isTerminalReason(reason: WebSocketClient.DisconnectReason): Boolean {
         return reason == WebSocketClient.DisconnectReason.INVALID_CONFIG ||
-            reason == WebSocketClient.DisconnectReason.SERVER_REJECTED ||
-            reason == WebSocketClient.DisconnectReason.RATE_LIMITED
+            reason == WebSocketClient.DisconnectReason.SERVER_REJECTED
     }
 
     private fun createConnectionNotificationChannel() {
@@ -318,7 +335,11 @@ class MuyuForegroundService : Service() {
     private fun foregroundTextForState(state: ConnectionState): String {
         return when (state) {
             ConnectionState.CONNECTING -> "电子木鱼正在连接"
-            ConnectionState.CONNECTED -> "电子木鱼已连接"
+            ConnectionState.CONNECTED -> if (MuyuConnectionRepository.partnerOnline.value) {
+                "电子木鱼已连接，对方在线"
+            } else {
+                "电子木鱼已连接，对方离线"
+            }
             ConnectionState.RECONNECTING -> "电子木鱼正在重连"
             else -> "电子木鱼未连接"
         }

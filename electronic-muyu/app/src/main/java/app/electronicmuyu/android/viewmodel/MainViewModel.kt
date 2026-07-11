@@ -6,6 +6,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.electronicmuyu.android.BuildConfig
 import app.electronicmuyu.android.audio.SoundManager
 import app.electronicmuyu.android.data.LocalDataStore
 import app.electronicmuyu.android.model.ConnectionState
@@ -42,6 +43,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val connectionState: StateFlow<ConnectionState> = MuyuConnectionRepository.connectionState
     val lastError: StateFlow<String> = MuyuConnectionRepository.lastError
+    val partnerOnline: StateFlow<Boolean> = MuyuConnectionRepository.partnerOnline
 
     private val _deviceId = MutableStateFlow("")
     val deviceId: StateFlow<String> = _deviceId.asStateFlow()
@@ -83,7 +85,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var connectionRequestGeneration = 0L
 
     companion object {
-        const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
+        val DEFAULT_SERVER_URL = if (BuildConfig.DEBUG) "ws://10.0.2.2:8443" else ""
         const val DEFAULT_ROOM_ID = "test-room"
         private const val MAX_ROOM_ID_LENGTH = 64
         private const val MAX_SERVER_URL_LENGTH = 2048
@@ -149,7 +151,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (age in 0L..MAX_UI_EVENT_AGE_MS) {
                             _lastReceivedTime.value = event.receivedAtMillis
                             _lastReceivedEvent.value = event.id
-                            playSoundAndVibrate()
+                            playRemoteFeedback()
                         }
                     }
                 } finally {
@@ -426,6 +428,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val scheme = parsedUri.scheme?.lowercase()
             if (
                 (scheme != "ws" && scheme != "wss") ||
+                (!BuildConfig.DEBUG && scheme != "wss") ||
                 parsedUri.host.isNullOrBlank() ||
                 !parsedUri.encodedUserInfo.isNullOrEmpty() ||
                 parsedUri.fragment != null ||
@@ -464,6 +467,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (_vibrationEnabled.value) {
             vibrationManager.shortTap()
+        }
+    }
+
+    private fun playRemoteFeedback() {
+        if (_soundEnabled.value) {
+            soundManager.playNotificationTap()
+        }
+        if (_vibrationEnabled.value) {
+            vibrationManager.notificationVibrate()
         }
     }
 

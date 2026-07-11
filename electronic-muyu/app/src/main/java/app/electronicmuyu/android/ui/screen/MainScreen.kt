@@ -57,6 +57,7 @@ fun MainScreen(
     lastError: String,
     wsEnabled: Boolean,
     lastDisconnectReason: WebSocketClient.DisconnectReason,
+    partnerOnline: Boolean,
     onWoodfishTap: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
@@ -112,7 +113,7 @@ fun MainScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            ConnectionIndicator(state = connectionState)
+            ConnectionIndicator(state = connectionState, partnerOnline = partnerOnline)
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -143,7 +144,11 @@ fun MainScreen(
             Spacer(modifier = Modifier.height(8.dp))
 
             val hintText = when (connectionState) {
-                ConnectionState.CONNECTED -> "已连接 — 敲木鱼对方将收到提醒"
+                ConnectionState.CONNECTED -> if (partnerOnline) {
+                    "已连接，对方在线 — 敲木鱼将实时发送提醒"
+                } else {
+                    "已连接服务器，但对方离线 — 当前提醒不会补发"
+                }
                 ConnectionState.CONNECTING -> "正在连接服务…"
                 ConnectionState.RECONNECTING -> "正在重连服务…"
                 ConnectionState.DISCONNECTED -> when (lastDisconnectReason) {
@@ -236,9 +241,13 @@ private fun WoodfishButton(onTap: () -> Unit) {
 }
 
 @Composable
-private fun ConnectionIndicator(state: ConnectionState) {
+private fun ConnectionIndicator(state: ConnectionState, partnerOnline: Boolean) {
     val (label, color) = when (state) {
-        ConnectionState.CONNECTED -> "已连接" to Color(0xFF4CAF50)
+        ConnectionState.CONNECTED -> if (partnerOnline) {
+            "对方在线" to Color(0xFF4CAF50)
+        } else {
+            "对方离线" to Color(0xFFFF9800)
+        }
         ConnectionState.CONNECTING -> "连接中" to Color(0xFFFFC107)
         ConnectionState.RECONNECTING -> "重连中" to Color(0xFFFFC107)
         ConnectionState.DISCONNECTED -> "未连接" to Color(0xFF9E9E9E)

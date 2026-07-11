@@ -92,6 +92,7 @@ fun MuyuApp(
     val connectionState by viewModel.connectionState.collectAsState()
     val lastReceivedEvent by viewModel.lastReceivedEvent.collectAsState()
     val lastError by viewModel.lastError.collectAsState()
+    val partnerOnline by viewModel.partnerOnline.collectAsState()
     val wsEnabled by viewModel.wsEnabled.collectAsState()
     val notificationEnabled by viewModel.notificationEnabled.collectAsState()
     val lastDisconnectReason by viewModel.lastDisconnectReason.collectAsState()
@@ -143,6 +144,7 @@ fun MuyuApp(
                 lastError = lastError,
                 wsEnabled = wsEnabled,
                 lastDisconnectReason = lastDisconnectReason,
+                partnerOnline = partnerOnline,
                 onWoodfishTap = { viewModel.onTap() },
                 onConnect = { viewModel.startConnection() },
                 onDisconnect = { viewModel.stopConnection() },
@@ -158,6 +160,7 @@ fun MuyuApp(
                 notificationPermissionGranted = notificationPermissionGranted,
                 notificationDeliveryStatus = notificationDeliveryStatus.label,
                 connectionState = connectionState,
+                partnerOnline = partnerOnline,
                 wsEnabled = wsEnabled,
                 lastDisconnectReason = lastDisconnectReason.label,
                 lastDisconnectAtMillis = lastDisconnectAtMillis,

@@ -41,6 +41,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
+import app.electronicmuyu.android.BuildConfig
 import app.electronicmuyu.android.data.LocalDataStore
 import app.electronicmuyu.android.model.ConnectionState
 import java.text.SimpleDateFormat
@@ -50,7 +51,7 @@ import kotlinx.coroutines.launch
 
 private const val MAX_ROOM_ID_LENGTH = 64
 private const val MAX_SERVER_URL_LENGTH = 2048
-private const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
+private val DEFAULT_SERVER_URL = if (BuildConfig.DEBUG) "ws://10.0.2.2:8443" else ""
 private const val DEFAULT_ROOM_ID = "test-room"
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -62,6 +63,7 @@ fun SettingsScreen(
     notificationPermissionGranted: Boolean,
     notificationDeliveryStatus: String,
     connectionState: ConnectionState,
+    partnerOnline: Boolean,
     wsEnabled: Boolean,
     lastDisconnectReason: String,
     lastDisconnectAtMillis: Long?,
@@ -150,6 +152,7 @@ fun SettingsScreen(
 
             ConnectionCard(
                 connectionState = connectionState,
+                partnerOnline = partnerOnline,
                 wsEnabled = wsEnabled,
                 lastDisconnectReason = lastDisconnectReason,
                 lastDisconnectAtMillis = lastDisconnectAtMillis,
@@ -413,7 +416,7 @@ private fun ConnectionConfigCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
             Text(
-                text = "ws:// 仅用于本地或短期测试；长期公网使用应切换为 wss://",
+                text = if (BuildConfig.DEBUG) "Debug 可使用 ws://；正式版本仅允许 wss://" else "正式版本仅允许 wss:// 加密连接",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
             )
@@ -453,6 +456,7 @@ private fun ConnectionConfigCard(
 @Composable
 private fun ConnectionCard(
     connectionState: ConnectionState,
+    partnerOnline: Boolean,
     wsEnabled: Boolean,
     lastDisconnectReason: String,
     lastDisconnectAtMillis: Long?,
@@ -532,6 +536,7 @@ private fun ConnectionCard(
             )
             Spacer(modifier = Modifier.height(8.dp))
             DiagnosticRow("WebSocket 状态", connectionDebugStateName(connectionState))
+            DiagnosticRow("对方在线", partnerOnline.toString())
             DiagnosticRow("最近断开原因", lastDisconnectReason)
             DiagnosticRow("最近断开时间", formatDisconnectTime(lastDisconnectAtMillis))
             DiagnosticRow("App 前后台", if (isAppInForeground) "foreground" else "background")
@@ -647,6 +652,7 @@ private fun validateServerUrl(serverUrl: String): String? {
         val scheme = uri.scheme?.lowercase()
         when {
             scheme != "ws" && scheme != "wss" -> "必须以 ws:// 或 wss:// 开头"
+            !BuildConfig.DEBUG && scheme != "wss" -> "正式版本仅允许 wss://"
             uri.host.isNullOrBlank() -> "服务器地址必须包含主机名或 IP"
             !uri.encodedUserInfo.isNullOrEmpty() -> "服务器地址不能包含用户名或密码"
             uri.fragment != null -> "服务器地址不能包含 #fragment"
