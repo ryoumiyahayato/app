@@ -1,7 +1,10 @@
 package app.electronicmuyu.android.service
 
+import app.electronicmuyu.android.model.ConnectionState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PendingTapQueueTest {
@@ -59,5 +62,12 @@ class PendingTapQueueTest {
         queue.offer(timestampMillis = 101, nowMillis = 5_000)
 
         assertEquals(101L, queue.poll(4_000).tap?.timestampMillis)
+    }
+
+    @Test
+    fun flushRequiresAuthenticatedConnectionAndOnlinePeer() {
+        assertFalse(shouldFlushPendingTaps(ConnectionState.RECONNECTING, partnerOnline = true))
+        assertFalse(shouldFlushPendingTaps(ConnectionState.CONNECTED, partnerOnline = false))
+        assertTrue(shouldFlushPendingTaps(ConnectionState.CONNECTED, partnerOnline = true))
     }
 }
