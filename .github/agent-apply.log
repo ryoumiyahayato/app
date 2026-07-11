@@ -1,14 +1,7 @@
 Traceback (most recent call last):
-  File "/tmp/apply_audit_fixes.py", line 21, in <module>
+  File "/tmp/apply_audit_fixes.py", line 566, in <module>
     replace_once(
-  File "/tmp/apply_audit_fixes.py", line 8, in replace_once
-    text = path.read_text(encoding='utf-8')
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/pathlib.py", line 1027, in read_text
-    with self.open(mode='r', encoding=encoding, errors=errors) as f:
-         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/opt/hostedtoolcache/Python/3.12.13/x64/lib/python3.12/pathlib.py", line 1013, in open
-    return io.open(self, mode, buffering, encoding, errors, newline)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-FileNotFoundError: [Errno 2] No such file or directory: '/electronic-muyu/app/src/main/java/app/electronicmuyu/android/network/WebSocketClient.kt'
+  File "/tmp/apply_audit_fixes.py", line 11, in replace_once
+    raise RuntimeError(f'{relative}: expected a match, found none')
+RuntimeError: electronic-muyu/app/src/main/java/app/electronicmuyu/android/ui/screen/SettingsScreen.kt: expected a match, found none
 exit_code=1
