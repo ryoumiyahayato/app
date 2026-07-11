@@ -1,6 +1,7 @@
 name: Verify electronic-muyu
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
