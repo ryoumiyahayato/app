@@ -221,6 +221,7 @@ export class SecurePair extends DurableObject {
       timestamp: Date.now()
     }));
     console.log(`[pairing] auth_ok pairHash=${attachment.pairHash} deviceHash=${attachment.deviceHash}`);
+    this.broadcastPeerState();
     await this.scheduleAuthAlarm();
   }
 
@@ -259,6 +260,30 @@ export class SecurePair extends DurableObject {
       }
     }
     console.log(`[pairing] encrypted_forward forwarded=${forwarded} pairHash=${attachment.pairHash}`);
+  }
+
+  broadcastPeerState() {
+    const authenticated = this.ctx.getWebSockets()
+      .filter((socket) => socket.readyState === 1)
+      .map((socket) => ({ socket, attachment: socket.deserializeAttachment() }))
+      .filter(({ attachment }) => attachment?.authenticated === true);
+    const timestamp = Date.now();
+
+    for (const { socket, attachment } of authenticated) {
+      const peerOnline = authenticated.some(({ attachment: candidate }) =>
+        candidate.deviceId !== attachment.deviceId
+      );
+      try {
+        socket.send(JSON.stringify({
+          type: "peer_state",
+          version: PROTOCOL_VERSION,
+          peerOnline,
+          timestamp
+        }));
+      } catch {
+        safeClose(socket, 1011, "peer state failed");
+      }
+    }
   }
 
   async revoke(request) {
@@ -333,6 +358,7 @@ export class SecurePair extends DurableObject {
       `[pairing] disconnected code=${code} clean=${wasClean} `
       + `pairHash=${attachment?.pairHash || "unknown"} deviceHash=${attachment?.deviceHash || "pending"}`
     );
+    this.broadcastPeerState();
   }
 
   webSocketError(socket) {
