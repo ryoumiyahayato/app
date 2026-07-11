@@ -22,56 +22,95 @@ const worker = spawn(
 worker.stdout.on("data", (chunk) => { output += chunk.toString(); });
 worker.stderr.on("data", (chunk) => { output += chunk.toString(); });
 
-function connect(roomId) {
+function nextJson(socket, predicate = () => true, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`${baseWebSocketUrl}/?room=${encodeURIComponent(roomId)}`);
-    const timer = setTimeout(() => reject(new Error(`WebSocket connect timeout: ${roomId}`)), 8_000);
-    socket.addEventListener("open", () => {
-      clearTimeout(timer);
-      resolve(socket);
-    }, { once: true });
-    socket.addEventListener("error", () => {
-      clearTimeout(timer);
-      reject(new Error(`WebSocket connection failed: ${roomId}`));
-    }, { once: true });
-  });
-}
-
-function nextJson(socket, timeoutMs = 5_000) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("WebSocket message timeout")), timeoutMs);
+    const timer = setTimeout(() => {
+      socket.removeEventListener("message", handler);
+      reject(new Error("WebSocket message timeout"));
+    }, timeoutMs);
     const handler = (event) => {
+      let value;
+      try {
+        value = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (!predicate(value)) return;
       clearTimeout(timer);
       socket.removeEventListener("message", handler);
-      resolve(JSON.parse(event.data));
+      resolve(value);
     };
     socket.addEventListener("message", handler);
   });
 }
 
-function expectNoMessage(socket, timeoutMs = 400) {
+function expectNoTap(socket, timeoutMs = 400) {
   return new Promise((resolve, reject) => {
+    const handler = (event) => {
+      try {
+        const value = JSON.parse(event.data);
+        if (value.type !== "tap") return;
+        clearTimeout(timer);
+        socket.removeEventListener("message", handler);
+        reject(new Error("Unexpected cross-room tap"));
+      } catch {
+        // Ignore non-JSON messages.
+      }
+    };
     const timer = setTimeout(() => {
       socket.removeEventListener("message", handler);
       resolve();
     }, timeoutMs);
-    const handler = () => {
-      clearTimeout(timer);
-      socket.removeEventListener("message", handler);
-      reject(new Error("Unexpected cross-room message"));
-    };
     socket.addEventListener("message", handler);
   });
 }
 
-function waitForClose(socket, timeoutMs = 5_000) {
+function waitForClose(socket, code, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("WebSocket close timeout")), timeoutMs);
     socket.addEventListener("close", (event) => {
       clearTimeout(timer);
-      resolve({ code: event.code, reason: event.reason });
+      if (event.code === code) resolve(event.reason);
+      else reject(new Error(`close=${event.code}, expected=${code}`));
     }, { once: true });
   });
+}
+
+async function waitForOpen(socket, timeoutMs = 5_000) {
+  await new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.removeEventListener("open", onOpen);
+      socket.removeEventListener("error", onError);
+    };
+    const onOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("WebSocket connection failed"));
+    };
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error("WebSocket open timeout"));
+    }, timeoutMs);
+    socket.addEventListener("open", onOpen, { once: true });
+    socket.addEventListener("error", onError, { once: true });
+  });
+}
+
+async function connect(roomId, deviceId) {
+  const socket = new WebSocket(`${baseWebSocketUrl}/?room=${encodeURIComponent(roomId)}`);
+  await waitForOpen(socket);
+  const statePromise = nextJson(socket, (message) => message.type === "room_state");
+  socket.send(JSON.stringify({
+    type: "hello",
+    pairId: roomId,
+    deviceId,
+    protocolVersion: 2
+  }));
+  return { socket, state: await statePromise, deviceId };
 }
 
 async function waitUntilReady() {
@@ -100,56 +139,117 @@ try {
   });
 
   const room = `integration-${Date.now()}`;
-  const first = await connect(room);
-  sockets.push(first);
-  assert.equal((await nextJson(first)).connections, 1);
+  const first = await connect(room, "device-a");
+  sockets.push(first.socket);
+  assert.equal(first.state.peerOnline, false);
+  assert.equal(first.state.connections, 1);
 
-  const second = await connect(room);
-  sockets.push(second);
-  assert.equal((await nextJson(second)).connections, 2);
+  const firstOnline = nextJson(
+    first.socket,
+    (message) => message.type === "room_state" && message.peerOnline === true
+  );
+  const second = await connect(room, "device-b");
+  sockets.push(second.socket);
+  await firstOnline;
+  assert.equal(second.state.peerOnline, true);
+  assert.equal(second.state.connections, 2);
 
   const timestamp = Date.now();
-  const forwardedPromise = nextJson(second);
-  first.send(JSON.stringify({
+  const forwarded = nextJson(second.socket, (message) => message.type === "tap");
+  first.socket.send(JSON.stringify({
     type: "tap",
     pairId: room,
-    deviceId: "device-first",
+    deviceId: "device-a",
     timestamp,
     ignored: "not-forwarded"
   }));
-  assert.deepEqual(await forwardedPromise, {
+  assert.deepEqual(await forwarded, {
     type: "tap",
     pairId: room,
-    deviceId: "device-first",
+    deviceId: "device-a",
     timestamp
   });
 
   const isolatedRoom = `${room}-isolated`;
-  const isolated = await connect(isolatedRoom);
-  sockets.push(isolated);
-  await nextJson(isolated);
-  const noLeak = expectNoMessage(isolated);
-  first.send(JSON.stringify({
+  const isolated = await connect(isolatedRoom, "device-isolated");
+  sockets.push(isolated.socket);
+  const noLeak = expectNoTap(isolated.socket);
+  first.socket.send(JSON.stringify({
     type: "tap",
     pairId: room,
-    deviceId: "device-first",
+    deviceId: "device-a",
     timestamp: Date.now()
   }));
   await noLeak;
 
+  const replaced = waitForClose(first.socket, 4004);
+  const replacement = await connect(room, "device-a");
+  sockets.push(replacement.socket);
+  await replaced;
+  assert.equal(replacement.state.peerOnline, true);
+  assert.equal(replacement.state.connections, 2);
+
   const third = new WebSocket(`${baseWebSocketUrl}/?room=${encodeURIComponent(room)}`);
-  assert.equal((await waitForClose(third)).code, 4002);
+  sockets.push(third);
+  const thirdClosed = waitForClose(third, 4002);
+  await waitForOpen(third);
+  third.send(JSON.stringify({
+    type: "hello",
+    pairId: room,
+    deviceId: "device-c",
+    protocolVersion: 2
+  }));
+  await thirdClosed;
 
-  const invalid = new WebSocket(`${baseWebSocketUrl}/`);
-  assert.equal((await waitForClose(invalid)).code, 4000);
+  const invalidRoom = new WebSocket(`${baseWebSocketUrl}/`);
+  sockets.push(invalidRoom);
+  await waitForClose(invalidRoom, 4000);
 
-  const binaryRoom = `${room}-binary`;
-  const binary = await connect(binaryRoom);
-  sockets.push(binary);
-  await nextJson(binary);
-  const binaryClose = waitForClose(binary);
-  binary.send(new Uint8Array([1, 2, 3]));
-  assert.equal((await binaryClose).code, 1003);
+  const helloRequiredRoom = `${room}-hello-required`;
+  const helloRequired = new WebSocket(
+    `${baseWebSocketUrl}/?room=${encodeURIComponent(helloRequiredRoom)}`
+  );
+  sockets.push(helloRequired);
+  const helloRequiredClosed = waitForClose(helloRequired, 4004);
+  await waitForOpen(helloRequired);
+  helloRequired.send(JSON.stringify({ type: "tap" }));
+  await helloRequiredClosed;
+
+  const saturatedRoom = `${room}-stale-pending`;
+  const stalePendingSockets = [];
+  for (let index = 0; index < 6; index += 1) {
+    const pending = new WebSocket(
+      `${baseWebSocketUrl}/?room=${encodeURIComponent(saturatedRoom)}`
+    );
+    pending.addEventListener("error", () => { /* Wrangler may report alarm close as error. */ });
+    sockets.push(pending);
+    stalePendingSockets.push(pending);
+    await waitForOpen(pending);
+  }
+  await sleep(6_000);
+  const afterPendingExpiry = await connect(saturatedRoom, "device-after-timeout");
+  sockets.push(afterPendingExpiry.socket);
+  assert.equal(afterPendingExpiry.state.peerOnline, false);
+  assert.equal(afterPendingExpiry.state.connections, 1);
+
+  const binary = await connect(`${room}-binary`, "device-binary");
+  sockets.push(binary.socket);
+  const binaryClosed = waitForClose(binary.socket, 1003);
+  binary.socket.send(new Uint8Array([1, 2, 3]));
+  await binaryClosed;
+
+  const oversized = await connect(`${room}-oversized`, "device-oversized");
+  sockets.push(oversized.socket);
+  const oversizedClosed = waitForClose(oversized.socket, 1009);
+  oversized.socket.send("x".repeat(4 * 1024 + 1));
+  await oversizedClosed;
+
+  const offline = nextJson(
+    replacement.socket,
+    (message) => message.type === "room_state" && message.peerOnline === false
+  );
+  second.socket.close(1000, "leave");
+  await offline;
 
   console.log("Cloudflare relay integration test passed");
 } catch (error) {
@@ -157,7 +257,11 @@ try {
   throw error;
 } finally {
   for (const socket of sockets) {
-    try { socket.close(1000, "test complete"); } catch { /* no-op */ }
+    try {
+      socket.close(1000, "test complete");
+    } catch {
+      // Ignore cleanup errors.
+    }
   }
   if (worker.exitCode === null) {
     if (process.platform === "win32") {
@@ -166,7 +270,11 @@ try {
       });
       await new Promise((resolve) => killer.once("exit", resolve));
     } else {
-      try { process.kill(-worker.pid, "SIGTERM"); } catch { /* already stopped */ }
+      try {
+        process.kill(-worker.pid, "SIGTERM");
+      } catch {
+        // Already stopped.
+      }
     }
   }
   await Promise.race([

@@ -16,6 +16,7 @@ const ROOM_ID = (process.env.ROOM_ID || 'test-room').trim();
 const DEVICE_ID = (process.env.DEVICE_ID || 'test-client').trim();
 const RELAY_TOKEN = process.env.RELAY_TOKEN || '';
 const TIMEOUT_MS = 5_000;
+const PROTOCOL_VERSION = 2;
 
 function maskDeviceId(deviceId) {
     if (!deviceId || deviceId.length < 8) return '***';
@@ -64,11 +65,17 @@ console.log(
 );
 
 const timeout = setTimeout(() => {
-    finish(1, '等待 relay 接受连接超时');
+    finish(1, '等待 relay 完成 hello 握手超时');
 }, TIMEOUT_MS);
 
 ws.on('open', () => {
-    console.log('[send-tap] WebSocket 已打开，等待 room_info');
+    console.log('[send-tap] WebSocket 已打开，发送 hello');
+    ws.send(JSON.stringify({
+        type: 'hello',
+        pairId: ROOM_ID,
+        deviceId: DEVICE_ID,
+        protocolVersion: PROTOCOL_VERSION
+    }));
 });
 
 ws.on('message', (data, isBinary) => {
@@ -85,9 +92,10 @@ ws.on('message', (data, isBinary) => {
         return;
     }
 
-    if (parsed.type !== 'room_info' || sent) return;
-    if (parsed.room !== ROOM_ID) {
-        finish(1, 'relay 返回的 room 与请求不一致');
+    if (parsed.type === 'hello_required' || sent) return;
+    if (parsed.type !== 'room_state') return;
+    if (parsed.pairId !== ROOM_ID) {
+        finish(1, 'relay 返回的 pairId 与请求不一致');
         return;
     }
 
@@ -104,7 +112,10 @@ ws.on('message', (data, isBinary) => {
             return;
         }
         sent = true;
-        console.log(`[send-tap] 已发送 tap，当前房间连接数=${parsed.connections}`);
+        console.log(
+            `[send-tap] 已发送 tap，当前设备连接数=${parsed.connections} `
+            + `对方在线=${Boolean(parsed.peerOnline)}`
+        );
         setTimeout(() => ws.close(1000, 'tap sent'), 200);
     });
 });
