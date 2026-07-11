@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import app.electronicmuyu.android.MainActivity
@@ -26,8 +27,10 @@ import app.electronicmuyu.android.security.PairingCrypto
 import app.electronicmuyu.android.security.SecureSecretStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -42,6 +45,9 @@ class MuyuForegroundService : Service() {
     private var foregroundStarted = false
     private var stopReason: WebSocketClient.DisconnectReason? = null
     private var activeStartId = 0
+    private val pendingTaps = PendingTapQueue()
+    private var pendingTapFlushJob: Job? = null
+    private var pendingTapExpiryJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -70,6 +76,7 @@ class MuyuForegroundService : Service() {
             wsClient.connectionState.collectLatest { state ->
                 MuyuConnectionRepository.setConnectionState(state)
                 if (foregroundStarted) updateForegroundNotification(state)
+                if (state == ConnectionState.CONNECTED) schedulePendingTapFlush()
             }
         }
         serviceScope.launch {
@@ -109,15 +116,13 @@ class MuyuForegroundService : Service() {
         when (intent?.action) {
             ACTION_START_CONNECT -> startSecureConnection(startId)
             ACTION_SEND_TAP -> {
-                if (
-                    foregroundStarted &&
-                    MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED
-                ) {
-                    val timestamp = intent.getLongExtra(EXTRA_TIMESTAMP, System.currentTimeMillis())
-                    serviceScope.launch { sendEncryptedTap(timestamp) }
+                val timestamp = intent.getLongExtra(EXTRA_TIMESTAMP, System.currentTimeMillis())
+                if (foregroundStarted) {
+                    enqueuePendingTap(timestamp)
                 } else {
-                    Log.d(TAG, "send tap ignored: secure service is not connected")
-                    if (!foregroundStarted) stopSelfResult(startId)
+                    Log.d(TAG, "send tap ignored: secure service is not running")
+                    MuyuConnectionRepository.setLastError("提醒未发送：安全连接服务未运行")
+                    stopSelfResult(startId)
                 }
             }
             ACTION_DISCONNECT -> disconnectAndStop(
@@ -209,11 +214,11 @@ class MuyuForegroundService : Service() {
         )
     }
 
-    private suspend fun sendEncryptedTap(timestamp: Long) {
-        if (MuyuConnectionRepository.connectionState.value != ConnectionState.CONNECTED) return
-        val stored = localDataStore.storedPair.first() ?: return
-        val key = sendKey ?: return
-        try {
+    private suspend fun sendEncryptedTap(timestamp: Long): Boolean {
+        if (MuyuConnectionRepository.connectionState.value != ConnectionState.CONNECTED) return false
+        val stored = localDataStore.storedPair.first() ?: return false
+        val key = sendKey ?: return false
+        return try {
             val counter = localDataStore.nextSendCounter()
             val message = PairingCrypto.encryptTap(
                 key,
@@ -222,13 +227,68 @@ class MuyuForegroundService : Service() {
                 counter,
                 timestamp
             )
-            if (!wsClient.sendEncryptedTap(message)) {
-                MuyuConnectionRepository.setLastError("提醒未发送：安全连接不可用")
-            }
+            wsClient.sendEncryptedTap(message)
         } catch (error: Exception) {
             Log.e(TAG, "encrypted tap send failed", error)
-            MuyuConnectionRepository.setLastError("提醒加密或发送失败")
+            false
         }
+    }
+
+    private fun enqueuePendingTap(timestamp: Long) {
+        val result = pendingTaps.offer(timestamp, SystemClock.elapsedRealtime())
+        reportDroppedPendingTaps(result.expiredCount, result.overflowCount)
+        schedulePendingTapExpiryCheck()
+        if (MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED) {
+            schedulePendingTapFlush()
+        }
+    }
+
+    private fun schedulePendingTapFlush() {
+        if (pendingTapFlushJob?.isActive == true || pendingTaps.isEmpty()) return
+        pendingTapFlushJob = serviceScope.launch {
+            try {
+                while (MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED) {
+                    val next = pendingTaps.poll(SystemClock.elapsedRealtime())
+                    reportDroppedPendingTaps(next.expiredCount, 0)
+                    val tap = next.tap ?: break
+                    if (!sendEncryptedTap(tap.timestampMillis)) {
+                        pendingTaps.addFirst(tap)
+                        break
+                    }
+                }
+            } finally {
+                pendingTapFlushJob = null
+                schedulePendingTapExpiryCheck()
+            }
+        }
+    }
+
+    private fun schedulePendingTapExpiryCheck() {
+        pendingTapExpiryJob?.cancel()
+        pendingTapExpiryJob = null
+        val expiresAt = pendingTaps.nextExpiryAtMillis() ?: return
+        pendingTapExpiryJob = serviceScope.launch {
+            delay((expiresAt - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+            pendingTapExpiryJob = null
+            val expired = pendingTaps.discardExpired(SystemClock.elapsedRealtime())
+            reportDroppedPendingTaps(expired, 0)
+            schedulePendingTapExpiryCheck()
+        }
+    }
+
+    private fun reportDroppedPendingTaps(expiredCount: Int, overflowCount: Int) {
+        val dropped = expiredCount + overflowCount
+        if (dropped == 0) return
+        val reason = if (overflowCount > 0) "发送队列已满" else "连接在 10 秒内未恢复"
+        MuyuConnectionRepository.setLastError("部分提醒未发送：$reason（$dropped 次）")
+    }
+
+    private fun clearPendingTaps() {
+        pendingTapFlushJob?.cancel()
+        pendingTapFlushJob = null
+        pendingTapExpiryJob?.cancel()
+        pendingTapExpiryJob = null
+        pendingTaps.clear()
     }
 
     private suspend fun decryptAndDeliver(message: EncryptedTap) {
@@ -284,6 +344,7 @@ class MuyuForegroundService : Service() {
     ) {
         if (stopReason != null) return
         stopReason = reason
+        clearPendingTaps()
         wsClient.disconnect(reason)
         MuyuConnectionRepository.setServiceRunning(false)
         MuyuConnectionRepository.setReconnecting(false)
@@ -302,6 +363,7 @@ class MuyuForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        clearPendingTaps()
         wsClient.shutdown(stopReason ?: WebSocketClient.DisconnectReason.SERVICE_DESTROYED)
         sendKey?.fill(0)
         receiveKey?.fill(0)

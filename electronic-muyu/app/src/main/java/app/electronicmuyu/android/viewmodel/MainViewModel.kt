@@ -379,10 +379,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 MuyuConnectionRepository.setLastError("本机功德计数保存失败")
             }
         }
-        if (connectionState.value == ConnectionState.CONNECTED) {
+        if (_storedPair.value != null && MuyuConnectionRepository.isServiceRunning.value) {
+            val context = getApplication<Application>()
             try {
-                getApplication<Application>().startService(
-                    Intent(getApplication(), MuyuForegroundService::class.java).apply {
+                context.startService(
+                    Intent(context, MuyuForegroundService::class.java).apply {
                         action = MuyuForegroundService.ACTION_SEND_TAP
                         putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, timestamp)
                     }
