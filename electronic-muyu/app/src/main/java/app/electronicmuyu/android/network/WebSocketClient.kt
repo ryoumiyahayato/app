@@ -35,6 +35,7 @@ class WebSocketClient(private val scope: CoroutineScope) {
         private const val TAG = "ElectronicMuyu"
         private const val INITIAL_RETRY_DELAY_MS = 1_000L
         private const val MAX_RETRY_DELAY_MS = 60_000L
+        private const val RATE_LIMIT_RETRY_DELAY_MS = 15_000L
 
         internal fun retryDelayForAttempt(attempt: Int): Long {
             val delayMs = INITIAL_RETRY_DELAY_MS * (1L shl attempt.coerceIn(0, 6))
@@ -55,7 +56,28 @@ class WebSocketClient(private val scope: CoroutineScope) {
         }
 
         internal fun shouldReconnect(reason: DisconnectReason): Boolean =
-            reason == DisconnectReason.NETWORK_ERROR || reason == DisconnectReason.SERVER_CLOSED
+            reason == DisconnectReason.NETWORK_ERROR ||
+                reason == DisconnectReason.SERVER_CLOSED ||
+                reason == DisconnectReason.RATE_LIMITED
+
+        internal fun peerOnlineFromMessage(raw: String): Boolean? = try {
+            val json = JSONObject(raw)
+            val exactKeys = json.keys().asSequence().toSet() ==
+                setOf("type", "version", "peerOnline", "timestamp")
+            if (
+                exactKeys &&
+                json.optString("type") == "peer_state" &&
+                json.optInt("version") == PAIRING_PROTOCOL_VERSION &&
+                json.opt("peerOnline") is Boolean &&
+                json.optLong("timestamp", 0L) > 0
+            ) {
+                json.getBoolean("peerOnline")
+            } else {
+                null
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     enum class DisconnectReason(val label: String) {
@@ -90,6 +112,8 @@ class WebSocketClient(private val scope: CoroutineScope) {
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
+    private val _partnerOnline = MutableStateFlow(false)
+    val partnerOnline: StateFlow<Boolean> = _partnerOnline.asStateFlow()
     private val _lastError = MutableStateFlow("")
     val lastError: StateFlow<String> = _lastError.asStateFlow()
     private val _lastDisconnectReason = MutableStateFlow(DisconnectReason.UNKNOWN)
@@ -128,6 +152,7 @@ class WebSocketClient(private val scope: CoroutineScope) {
         previous?.cancel()
         this.credentials = credentials
         authenticated = false
+        _partnerOnline.value = false
         _lastError.value = ""
         _connectionState.value = if (force) ConnectionState.RECONNECTING else ConnectionState.CONNECTING
         Log.d(TAG, "secure socket connecting pairHash=${shortHash(credentials.pairId)}")
@@ -169,6 +194,13 @@ class WebSocketClient(private val scope: CoroutineScope) {
                         Log.d(TAG, "secure socket authenticated pairHash=${shortHash(credentials.pairId)}")
                         return@launch
                     }
+
+                    peerOnlineFromMessage(text)?.let { isOnline ->
+                        _partnerOnline.value = isOnline
+                        Log.d(TAG, "secure peer state online=$isOnline pairHash=${shortHash(credentials.pairId)}")
+                        return@launch
+                    }
+
                     val message = EncryptedTap.fromJson(text)
                     if (message == null || message.pairId != credentials.pairId ||
                         message.sender != credentials.peerDeviceId
@@ -206,7 +238,12 @@ class WebSocketClient(private val scope: CoroutineScope) {
                         response?.code?.let { it in 400..499 } == true -> DisconnectReason.SERVER_REJECTED
                         else -> DisconnectReason.NETWORK_ERROR
                     }
-                    finish(reason, if (reason == DisconnectReason.NETWORK_ERROR) "安全连接暂时不可用" else "服务器拒绝安全连接")
+                    val message = when (reason) {
+                        DisconnectReason.NETWORK_ERROR -> "安全连接暂时不可用"
+                        DisconnectReason.RATE_LIMITED -> "连接受限，将稍后自动重试"
+                        else -> "服务器拒绝安全连接"
+                    }
+                    finish(reason, message)
                 }
             }
         }
@@ -229,9 +266,11 @@ class WebSocketClient(private val scope: CoroutineScope) {
         retryAttempt = 0
         authenticated = false
         credentials = null
+        _partnerOnline.value = false
         recordDisconnect(reason)
         _isReconnecting.value = false
         _lastReconnectResult.value = "stopped: ${reason.label}"
+        if (reason == DisconnectReason.USER_ACTION) _lastError.value = ""
         _connectionState.value = if (reason == DisconnectReason.PAIR_REVOKED) ConnectionState.REVOKED else ConnectionState.DISCONNECTED
         socket?.let { if (!it.close(1000, reason.label)) it.cancel() }
     }
@@ -246,23 +285,29 @@ class WebSocketClient(private val scope: CoroutineScope) {
     private fun finish(reason: DisconnectReason, message: String) {
         recordDisconnect(reason)
         authenticated = false
+        _partnerOnline.value = false
         _lastError.value = message
         _connectionState.value = when (reason) {
             DisconnectReason.AUTHENTICATION_FAILED -> ConnectionState.AUTHENTICATION_FAILED
             DisconnectReason.PAIR_REVOKED -> ConnectionState.REVOKED
             else -> ConnectionState.DISCONNECTED
         }
-        if (shouldReconnect(reason)) scheduleReconnect() else {
+        if (shouldReconnect(reason)) scheduleReconnect(reason) else {
             _isReconnecting.value = false
             _lastReconnectResult.value = "stopped: ${reason.label}"
         }
     }
 
-    private fun scheduleReconnect() {
+    private fun scheduleReconnect(reason: DisconnectReason) {
         if (reconnectJob?.isActive == true) return
         val saved = credentials ?: return
         reconnectJob = scope.launch {
-            val delayMs = jitteredRetryDelay(retryAttempt++)
+            val normalDelay = jitteredRetryDelay(retryAttempt++)
+            val delayMs = if (reason == DisconnectReason.RATE_LIMITED) {
+                maxOf(normalDelay, RATE_LIMIT_RETRY_DELAY_MS)
+            } else {
+                normalDelay
+            }
             _isReconnecting.value = true
             _connectionState.value = ConnectionState.RECONNECTING
             _lastReconnectResult.value = "scheduled in ${delayMs}ms"
@@ -274,6 +319,7 @@ class WebSocketClient(private val scope: CoroutineScope) {
 
     private fun failTerminal(reason: DisconnectReason, message: String) {
         _lastError.value = message
+        _partnerOnline.value = false
         _connectionState.value = ConnectionState.DISCONNECTED
         _isReconnecting.value = false
         recordDisconnect(reason)
@@ -285,6 +331,7 @@ class WebSocketClient(private val scope: CoroutineScope) {
     private fun retire(value: Long, socket: WebSocket): Boolean {
         if (!isCurrent(value, socket)) return false
         webSocket = null
+        _partnerOnline.value = false
         generation++
         return true
     }
@@ -306,7 +353,7 @@ class WebSocketClient(private val scope: CoroutineScope) {
     private fun userMessage(reason: DisconnectReason): String = when (reason) {
         DisconnectReason.AUTHENTICATION_FAILED -> "设备认证失败，请重新配对"
         DisconnectReason.PAIR_REVOKED -> "安全配对已撤销"
-        DisconnectReason.RATE_LIMITED -> "发送过于频繁，请稍后重试"
+        DisconnectReason.RATE_LIMITED -> "连接受限，将稍后自动重试"
         DisconnectReason.SERVER_REJECTED -> "服务器拒绝了安全连接"
         else -> "安全连接已断开"
     }
