@@ -1,19 +1,26 @@
-name: Diagnose second audit patch
+name: Apply and verify second audit fixes
 
 on:
   pull_request:
     paths:
+      - 'electronic-muyu/**'
       - '.github/agent-payload/**'
+      - '.github/agent-apply.log'
+      - '.github/workflows/apply-second-audit-fixes.yml'
       - '.github/workflows/verify-electronic-muyu.yml'
 
 permissions:
   contents: write
 
+concurrency:
+  group: electronic-muyu-audit-fix-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  diagnose:
+  apply-and-verify:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'agent/fix-second-audit-findings'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 90
 
     steps:
       - name: Check out repair branch
@@ -27,7 +34,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Apply patch and capture diagnostics
+      - name: Decode and apply fixes
         id: apply
         continue-on-error: true
         shell: bash
@@ -35,21 +42,21 @@ jobs:
           set +e
           cat .github/agent-payload/part* > /tmp/audit-fixes.b64
           base64 --decode /tmp/audit-fixes.b64 | gzip --decompress > /tmp/apply_audit_fixes.py
-          python -m py_compile /tmp/apply_audit_fixes.py > .github/agent-apply.log 2>&1
+          sed -i 's#ROOT = Path(__file__).resolve().parents\[1\]#ROOT = Path.cwd()#' /tmp/apply_audit_fixes.py
+          python -m py_compile /tmp/apply_audit_fixes.py > /tmp/agent-apply.log 2>&1
           status=$?
           if [ "$status" -eq 0 ]; then
-            python /tmp/apply_audit_fixes.py >> .github/agent-apply.log 2>&1
+            python /tmp/apply_audit_fixes.py >> /tmp/agent-apply.log 2>&1
             status=$?
           fi
-          echo "exit_code=$status" >> .github/agent-apply.log
+          echo "exit_code=$status" >> /tmp/agent-apply.log
           exit "$status"
 
-      - name: Commit diagnostic log
+      - name: Record patch diagnostics
         if: steps.apply.outcome == 'failure'
         shell: bash
         run: |
           set -euo pipefail
-          cp .github/agent-apply.log /tmp/agent-apply.log
           git reset --hard HEAD
           git clean -fd
           cp /tmp/agent-apply.log .github/agent-apply.log
@@ -59,7 +66,97 @@ jobs:
           git commit -m 'chore: record audit patch diagnostic'
           git push origin HEAD:${{ github.head_ref }}
 
-      - name: Fail after recording diagnostics
+      - name: Stop after patch failure
         if: steps.apply.outcome == 'failure'
         shell: bash
         run: exit 1
+
+      - name: Remove temporary files and restore normal CI workflow
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .github/agent-payload
+          rm -f .github/agent-apply.log
+          rm -f .github/workflows/apply-second-audit-fixes.yml
+          git fetch origin main
+          git checkout origin/main -- .github/workflows/verify-electronic-muyu.yml
+          git diff --check
+
+      - name: Set up Node.js
+        if: steps.apply.outcome == 'success'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            electronic-muyu/server/package-lock.json
+            electronic-muyu/cloudflare-relay/package-lock.json
+
+      - name: Verify local relay
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        working-directory: electronic-muyu/server
+        run: |
+          set -euo pipefail
+          npm ci
+          node index.js > /tmp/electronic-muyu-relay.log 2>&1 &
+          relay_pid=$!
+          trap 'kill "$relay_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:8443/health >/dev/null; then
+              break
+            fi
+            sleep 0.25
+          done
+          curl --fail --silent http://127.0.0.1:8443/health >/dev/null
+          npm test
+          kill "$relay_pid" 2>/dev/null || true
+          wait "$relay_pid" 2>/dev/null || true
+          trap - EXIT
+
+      - name: Verify Cloudflare relay
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        working-directory: electronic-muyu/cloudflare-relay
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run verify
+
+      - name: Set up Java
+        if: steps.apply.outcome == 'success'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        if: steps.apply.outcome == 'success'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Verify Android source
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        working-directory: electronic-muyu
+        run: |
+          set -euo pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+
+      - name: Commit repaired source to PR branch
+        if: steps.apply.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: address second audit findings'
+          git push origin HEAD:${{ github.head_ref }}
