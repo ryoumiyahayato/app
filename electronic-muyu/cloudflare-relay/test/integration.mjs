@@ -60,13 +60,23 @@ function connect(pairId) {
   });
 }
 
-function nextJson(socket, timeoutMs = 5_000) {
+function nextJson(socket, predicate = () => true, timeoutMs = 5_000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("WebSocket message timeout")), timeoutMs);
+    const timer = setTimeout(() => {
+      socket.removeEventListener("message", handler);
+      reject(new Error("WebSocket message timeout"));
+    }, timeoutMs);
     const handler = (event) => {
+      let value;
+      try {
+        value = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (!predicate(value)) return;
       clearTimeout(timer);
       socket.removeEventListener("message", handler);
-      resolve(JSON.parse(event.data));
+      resolve(value);
     };
     socket.addEventListener("message", handler);
   });
@@ -83,11 +93,16 @@ function waitForClose(socket, timeoutMs = 8_000) {
 }
 
 async function authenticate(socket, pairId, deviceId, token) {
-  const received = nextJson(socket);
+  const authMessage = nextJson(socket, (message) => message.type === "auth_ok");
+  const peerStateMessage = nextJson(socket, (message) => message.type === "peer_state");
   socket.send(JSON.stringify({ type: "auth", version: 1, pairId, deviceId, token }));
-  const response = await received;
+  const response = await authMessage;
   assert.equal(response.type, "auth_ok");
-  return response;
+  const peerState = await peerStateMessage;
+  assert.equal(peerState.version, 1);
+  assert.equal(typeof peerState.peerOnline, "boolean");
+  assert.ok(peerState.timestamp > 0);
+  return { response, peerState };
 }
 
 async function waitUntilReady() {
@@ -219,8 +234,17 @@ try {
   const first = await connect(pairId);
   const second = await connect(pairId);
   sockets.push(first, second);
-  assert.equal((await authenticate(first, pairId, inviter.deviceId, inviterToken)).slot, 0);
-  assert.equal((await authenticate(second, pairId, selectedJoiner.deviceId, joinerToken)).slot, 1);
+  const firstAuth = await authenticate(first, pairId, inviter.deviceId, inviterToken);
+  assert.equal(firstAuth.response.slot, 0);
+  assert.equal(firstAuth.peerState.peerOnline, false);
+  const firstSeesOnline = nextJson(
+    first,
+    (message) => message.type === "peer_state" && message.peerOnline === true
+  );
+  const secondAuth = await authenticate(second, pairId, selectedJoiner.deviceId, joinerToken);
+  assert.equal(secondAuth.response.slot, 1);
+  assert.equal(secondAuth.peerState.peerOnline, true);
+  await firstSeesOnline;
   pending.close(1000, "pending slot check complete");
   await sleep(100);
 
@@ -249,23 +273,44 @@ try {
     iv: b64(randomBytes(12)),
     ciphertext: b64(randomBytes(64))
   };
-  const forwarded = nextJson(second);
+  const forwarded = nextJson(second, (message) => message.type === "encrypted_tap");
   first.send(JSON.stringify(encryptedTap));
   assert.deepEqual(await forwarded, encryptedTap);
 
+  const secondSeesOffline = nextJson(
+    second,
+    (message) => message.type === "peer_state" && message.peerOnline === false
+  );
   const replayClose = waitForClose(first);
   first.send(JSON.stringify(encryptedTap));
   assert.equal((await replayClose).code, 4414);
+  await secondSeesOffline;
 
   const reconnected = await connect(pairId);
   sockets.push(reconnected);
-  await authenticate(reconnected, pairId, inviter.deviceId, inviterToken);
+  const secondSeesOnlineAgain = nextJson(
+    second,
+    (message) => message.type === "peer_state" && message.peerOnline === true
+  );
+  const reconnectedAuth = await authenticate(reconnected, pairId, inviter.deviceId, inviterToken);
+  assert.equal(reconnectedAuth.peerState.peerOnline, true);
+  await secondSeesOnlineAgain;
 
   const plaintext = await connect(pairId);
   sockets.push(plaintext);
-  await second.close(1000, "replace for protocol check");
-  await sleep(100);
-  await authenticate(plaintext, pairId, selectedJoiner.deviceId, joinerToken);
+  const reconnectedSeesOffline = nextJson(
+    reconnected,
+    (message) => message.type === "peer_state" && message.peerOnline === false
+  );
+  second.close(1000, "replace for protocol check");
+  await reconnectedSeesOffline;
+  const reconnectedSeesOnline = nextJson(
+    reconnected,
+    (message) => message.type === "peer_state" && message.peerOnline === true
+  );
+  const plaintextAuth = await authenticate(plaintext, pairId, selectedJoiner.deviceId, joinerToken);
+  assert.equal(plaintextAuth.peerState.peerOnline, true);
+  await reconnectedSeesOnline;
   const plaintextClose = waitForClose(plaintext);
   plaintext.send(JSON.stringify({ type: "tap", timestamp: Date.now() }));
   assert.equal((await plaintextClose).code, 4400);
@@ -338,9 +383,7 @@ try {
     }
   }
   await Promise.race([
-    worker.exitCode === null
-      ? new Promise((resolve) => worker.once("exit", resolve))
-      : Promise.resolve(),
-    sleep(3_000)
+    new Promise((resolve) => worker.once("exit", resolve)),
+    sleep(5_000)
   ]);
 }
