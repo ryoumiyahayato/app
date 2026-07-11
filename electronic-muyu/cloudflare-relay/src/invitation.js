@@ -5,6 +5,7 @@ import {
   PROTOCOL_VERSION,
   constantTimeEqual,
   decodeBase64Url,
+  isInviteExpired,
   randomBase64Url,
   sha256Base64Url,
   shortHash
@@ -130,7 +131,7 @@ export class InvitationSession extends DurableObject {
       if (["expired", "cancelled", "rejected", "paired"].includes(state.status)) {
         return { error: terminalResponse(state) };
       }
-      if (now >= state.expiresAt) {
+      if (isInviteExpired(state.expiresAt, now)) {
         await transaction.put("invite", this.tombstone(state, "expired", now));
         return { error: errorResponse(410, "invite_expired") };
       }
@@ -173,7 +174,7 @@ export class InvitationSession extends DurableObject {
     if (["expired", "cancelled", "rejected"].includes(state.status)) {
       return terminalResponse(state);
     }
-    if (input.now >= state.expiresAt && state.status !== "paired") {
+    if (isInviteExpired(state.expiresAt, input.now) && state.status !== "paired") {
       await this.expire(state, input.now);
       return errorResponse(410, "invite_expired");
     }

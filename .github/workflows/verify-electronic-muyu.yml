@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - fix/z-audit-issues-20260710
+      - feat/secure-qr-pairing-20260710
   pull_request:
     paths:
       - 'electronic-muyu/**'
@@ -31,7 +32,9 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-          cache-dependency-path: electronic-muyu/server/package-lock.json
+          cache-dependency-path: |
+            electronic-muyu/server/package-lock.json
+            electronic-muyu/cloudflare-relay/package-lock.json
 
       - name: Set up Java
         uses: actions/setup-java@v4

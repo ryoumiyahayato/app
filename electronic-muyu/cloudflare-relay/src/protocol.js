@@ -253,3 +253,9 @@ export async function computeSas(transcript) {
   const firstTwentyBits = (digest[0] << 12) | (digest[1] << 4) | (digest[2] >> 4);
   return String(firstTwentyBits % 1_000_000).padStart(6, "0");
 }
+
+export function isInviteExpired(expiresAt, now) {
+  return !Number.isSafeInteger(expiresAt)
+    || !Number.isSafeInteger(now)
+    || now >= expiresAt;
+}

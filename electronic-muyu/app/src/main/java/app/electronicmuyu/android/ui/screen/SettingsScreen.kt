@@ -8,17 +8,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -27,31 +27,24 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.core.net.toUri
-import app.electronicmuyu.android.data.LocalDataStore
 import app.electronicmuyu.android.model.ConnectionState
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import kotlinx.coroutines.launch
-
-private const val MAX_ROOM_ID_LENGTH = 64
-private const val MAX_SERVER_URL_LENGTH = 2048
-private const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
-private const val DEFAULT_ROOM_ID = "test-room"
+import app.electronicmuyu.android.pairing.PairMetadata
+import app.electronicmuyu.android.pairing.PairingStage
+import app.electronicmuyu.android.pairing.PairingUiState
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,684 +53,217 @@ fun SettingsScreen(
     vibrationEnabled: Boolean,
     notificationEnabled: Boolean,
     notificationPermissionGranted: Boolean,
-    notificationDeliveryStatus: String,
     connectionState: ConnectionState,
-    wsEnabled: Boolean,
-    lastDisconnectReason: String,
-    lastDisconnectAtMillis: Long?,
-    isAppInForeground: Boolean,
-    isReconnecting: Boolean,
-    lastReconnectResult: String,
-    isServiceRunning: Boolean,
-    foregroundNotificationText: String,
-    serverUrl: String,
-    roomId: String,
-    deviceIdDisplay: String,
+    pairing: PairingUiState,
+    storedPair: PairMetadata?,
+    allowRelayOverride: Boolean,
+    debugRelayOverride: String,
+    lastError: String,
     onSoundToggle: (Boolean) -> Unit,
     onVibrationToggle: (Boolean) -> Unit,
     onNotificationToggle: (Boolean) -> Unit,
-    onOpenNotificationSettings: () -> Unit,
-    onSendTestNotification: () -> Unit = {},
+    onCreateInvite: () -> Unit,
+    onScanInvite: () -> Unit,
+    onCancelInvite: () -> Unit,
+    onRegenerateInvite: () -> Unit,
+    onConfirmSas: () -> Unit,
+    onRejectSas: () -> Unit,
+    onRevokePair: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
-    onSaveConfig: suspend (serverUrl: String, roomId: String) -> Boolean,
-    onResetDefaults: suspend () -> Boolean,
+    onSaveDebugRelay: (String) -> Unit,
     onClearCounts: () -> Unit,
     onNavigateBack: () -> Unit
 ) {
+    var confirmRevoke by remember { mutableStateOf(false) }
     Scaffold(
         topBar = {
             TopAppBar(
-                title = {
-                    Text(
-                        text = "设置",
-                        style = MaterialTheme.typography.titleLarge
-                    )
-                },
+                title = { Text("设置") },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "返回"
-                        )
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
+                }
             )
         }
-    ) { paddingValues ->
+    ) { padding ->
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(horizontal = 16.dp)
+            Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp)
                 .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.Top
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            Spacer(modifier = Modifier.height(8.dp))
-
-            FeedbackCard(
-                soundEnabled = soundEnabled,
-                vibrationEnabled = vibrationEnabled,
-                onSoundToggle = onSoundToggle,
-                onVibrationToggle = onVibrationToggle
+            Spacer(Modifier.height(1.dp))
+            PairingCard(
+                pairing, storedPair, connectionState,
+                onCreateInvite, onScanInvite, onCancelInvite, onRegenerateInvite,
+                onConfirmSas, onRejectSas,
+                onRevoke = { confirmRevoke = true }, onConnect, onDisconnect
             )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            NotificationCard(
-                notificationEnabled = notificationEnabled,
-                notificationPermissionGranted = notificationPermissionGranted,
-                notificationDeliveryStatus = notificationDeliveryStatus,
-                onNotificationToggle = onNotificationToggle,
-                onOpenNotificationSettings = onOpenNotificationSettings,
-                onSendTestNotification = onSendTestNotification
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            ConnectionConfigCard(
-                serverUrl = serverUrl,
-                roomId = roomId,
-                deviceIdDisplay = deviceIdDisplay,
-                onSaveConfig = onSaveConfig,
-                onResetDefaults = onResetDefaults
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            ConnectionCard(
-                connectionState = connectionState,
-                wsEnabled = wsEnabled,
-                lastDisconnectReason = lastDisconnectReason,
-                lastDisconnectAtMillis = lastDisconnectAtMillis,
-                isAppInForeground = isAppInForeground,
-                isReconnecting = isReconnecting,
-                lastReconnectResult = lastReconnectResult,
-                isServiceRunning = isServiceRunning,
-                foregroundNotificationText = foregroundNotificationText,
-                onConnect = onConnect,
-                onDisconnect = onDisconnect
-            )
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            ActionsCard(onClearCounts = onClearCounts)
-
-            Spacer(modifier = Modifier.height(16.dp))
-
-            AboutCard()
-
-            Spacer(modifier = Modifier.height(32.dp))
-        }
-    }
-}
-
-@Composable
-private fun FeedbackCard(
-    soundEnabled: Boolean,
-    vibrationEnabled: Boolean,
-    onSoundToggle: (Boolean) -> Unit,
-    onVibrationToggle: (Boolean) -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            SectionTitle("反馈")
-            Spacer(modifier = Modifier.height(8.dp))
-
-            SettingSwitchRow(
-                label = "声音",
-                checked = soundEnabled,
-                onCheckedChange = onSoundToggle
-            )
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-            SettingSwitchRow(
-                label = "震动",
-                checked = vibrationEnabled,
-                onCheckedChange = onVibrationToggle
-            )
-        }
-    }
-}
-
-@Composable
-private fun NotificationCard(
-    notificationEnabled: Boolean,
-    notificationPermissionGranted: Boolean,
-    notificationDeliveryStatus: String,
-    onNotificationToggle: (Boolean) -> Unit,
-    onOpenNotificationSettings: () -> Unit,
-    onSendTestNotification: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            SectionTitle("通知")
-            Spacer(modifier = Modifier.height(8.dp))
-
-            SettingSwitchRow(
-                label = "通知提醒",
-                checked = notificationEnabled,
-                onCheckedChange = onNotificationToggle
-            )
-
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = if (notificationPermissionGranted) {
-                    "通知权限：已授权"
-                } else {
-                    "通知权限：未授权"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = if (notificationPermissionGranted) {
-                    Color(0xFF4CAF50)
-                } else {
-                    Color(0xFFF44336)
+            if (pairing.legacyDetected) {
+                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                    Text("旧连接方式不再安全，请重新扫码配对。旧 room 不会自动连接或转换为新凭据。", Modifier.padding(16.dp))
                 }
+            }
+            if (lastError.isNotBlank()) {
+                Text(lastError, color = MaterialTheme.colorScheme.error)
+            }
+            PreferenceCard(
+                soundEnabled,
+                vibrationEnabled,
+                notificationEnabled,
+                notificationPermissionGranted,
+                onSoundToggle,
+                onVibrationToggle,
+                onNotificationToggle
             )
-            Text(
-                text = "实际状态：$notificationDeliveryStatus",
-                style = MaterialTheme.typography.bodySmall,
-                color = if (notificationDeliveryStatus == "通知可用") {
-                    Color(0xFF4CAF50)
-                } else {
-                    Color(0xFFF44336)
+            if (allowRelayOverride) {
+                DeveloperRelayCard(debugRelayOverride, onSaveDebugRelay)
+            }
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp)) {
+                    Text("数据", fontWeight = FontWeight.Bold)
+                    Text("私钥、access token 和消息密钥由 Android Keystore 包装保护，不进入普通 DataStore 或备份。")
+                    OutlinedButton(onClick = onClearCounts) { Text("清空计数") }
                 }
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-            OutlinedButton(
-                onClick = onOpenNotificationSettings,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("打开系统通知设置")
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(
-                onClick = onSendTestNotification,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("发送测试通知")
-            }
+            Text("版本 0.7.0 · 安全扫码配对协议 v1", style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(24.dp))
         }
     }
-}
-
-@Composable
-private fun ConnectionConfigCard(
-    serverUrl: String,
-    roomId: String,
-    deviceIdDisplay: String,
-    onSaveConfig: suspend (serverUrl: String, roomId: String) -> Boolean,
-    onResetDefaults: suspend () -> Boolean
-) {
-    val coroutineScope = rememberCoroutineScope()
-    var localServerUrl by remember(serverUrl) { mutableStateOf(serverUrl) }
-    var localRoomId by remember(roomId) { mutableStateOf(roomId) }
-    var serverUrlError by remember { mutableStateOf<String?>(null) }
-    var roomIdError by remember { mutableStateOf<String?>(null) }
-    var savedMessage by remember { mutableStateOf<String?>(null) }
-    var isSaving by remember { mutableStateOf(false) }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
+    if (confirmRevoke) {
+        AlertDialog(
+            onDismissRequest = { confirmRevoke = false },
+            title = { Text("解除安全配对？") },
+            text = { Text("两台设备的当前凭据将立即失效。之后需要重新扫码配对。") },
+            confirmButton = {
+                TextButton(onClick = { confirmRevoke = false; onRevokePair() }) { Text("解除配对") }
+            },
+            dismissButton = { TextButton(onClick = { confirmRevoke = false }) { Text("取消") } }
         )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            SectionTitle("连接配置")
-            Spacer(modifier = Modifier.height(12.dp))
-
-            OutlinedTextField(
-                value = localServerUrl,
-                onValueChange = {
-                    localServerUrl = it
-                    serverUrlError = null
-                    savedMessage = null
-                },
-                enabled = !isSaving,
-                label = { Text("服务器地址") },
-                placeholder = { Text(DEFAULT_SERVER_URL) },
-                singleLine = true,
-                isError = serverUrlError != null,
-                supportingText = serverUrlError?.let { error -> { Text(error) } },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            OutlinedTextField(
-                value = localRoomId,
-                onValueChange = {
-                    localRoomId = it
-                    roomIdError = null
-                    savedMessage = null
-                },
-                enabled = !isSaving,
-                label = { Text("房间 ID") },
-                placeholder = { Text(DEFAULT_ROOM_ID) },
-                singleLine = true,
-                isError = roomIdError != null,
-                supportingText = roomIdError?.let { error -> { Text(error) } },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "设备 ID: $deviceIdDisplay",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            Button(
-                onClick = {
-                    val normalizedServerUrl = localServerUrl.trim()
-                    val normalizedRoomId = localRoomId.trim()
-                    serverUrlError = validateServerUrl(normalizedServerUrl)
-                    roomIdError = validateRoomId(normalizedRoomId)
-                    savedMessage = null
-
-                    if (serverUrlError == null && roomIdError == null) {
-                        coroutineScope.launch {
-                            isSaving = true
-                            try {
-                                if (onSaveConfig(normalizedServerUrl, normalizedRoomId)) {
-                                    localServerUrl = normalizedServerUrl
-                                    localRoomId = normalizedRoomId
-                                    savedMessage = "配置已保存"
-                                } else {
-                                    serverUrlError = "配置保存失败，请检查地址或稍后重试"
-                                }
-                            } finally {
-                                isSaving = false
-                            }
-                        }
-                    }
-                },
-                enabled = !isSaving,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text(if (isSaving) "正在保存…" else "保存配置")
-            }
-
-            savedMessage?.let { message ->
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = message,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF4CAF50)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "修改配置后，请断开并重新连接以生效",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
-            Text(
-                text = "ws:// 仅用于本地或短期测试；长期公网使用应切换为 wss://",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            OutlinedButton(
-                onClick = {
-                    coroutineScope.launch {
-                        isSaving = true
-                        savedMessage = null
-                        try {
-                            if (onResetDefaults()) {
-                                localServerUrl = DEFAULT_SERVER_URL
-                                localRoomId = DEFAULT_ROOM_ID
-                                serverUrlError = null
-                                roomIdError = null
-                                savedMessage = "已恢复默认配置"
-                            } else {
-                                serverUrlError = "恢复默认配置失败，请稍后重试"
-                            }
-                        } finally {
-                            isSaving = false
-                        }
-                    }
-                },
-                enabled = !isSaving,
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("恢复默认")
-            }
-        }
     }
 }
 
 @Composable
-private fun ConnectionCard(
+private fun PairingCard(
+    pairing: PairingUiState,
+    storedPair: PairMetadata?,
     connectionState: ConnectionState,
-    wsEnabled: Boolean,
-    lastDisconnectReason: String,
-    lastDisconnectAtMillis: Long?,
-    isAppInForeground: Boolean,
-    isReconnecting: Boolean,
-    lastReconnectResult: String,
-    isServiceRunning: Boolean,
-    foregroundNotificationText: String,
+    onCreate: () -> Unit,
+    onScan: () -> Unit,
+    onCancel: () -> Unit,
+    onRegenerate: () -> Unit,
+    onConfirm: () -> Unit,
+    onReject: () -> Unit,
+    onRevoke: () -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit
 ) {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(pairing.expiresAt) {
+        while (pairing.expiresAt != null) { now = System.currentTimeMillis(); delay(1_000) }
+    }
     Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            SectionTitle("连接")
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("连接状态", style = MaterialTheme.typography.bodyLarge)
-                Text(
-                    text = connectionDisplayName(connectionState),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = connectionDisplayColor(connectionState)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(12.dp))
-
-            if (wsEnabled) {
-                Button(
-                    onClick = onDisconnect,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error
-                    ),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("断开连接")
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("安全配对", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            when (pairing.stage) {
+                PairingStage.UNPAIRED, PairingStage.FAILED -> {
+                    Text(if (pairing.stage == PairingStage.FAILED) pairing.message else "二维码只能使用一次，并会在 2 分钟内过期。")
+                    Button(onClick = onCreate, enabled = !pairing.busy) { Text("创建配对二维码") }
+                    OutlinedButton(onClick = onScan, enabled = !pairing.busy) { Text("扫描对方二维码") }
                 }
-            } else {
-                Button(
-                    onClick = onConnect,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Text("连接服务")
+                PairingStage.CREATING_INVITE, PairingStage.JOINING -> Text(pairing.message.ifBlank { "正在建立安全连接" })
+                PairingStage.WAITING_FOR_SCAN -> {
+                    pairing.qrPayload?.let { PairingQrCode(it, Modifier.size(280.dp).align(Alignment.CenterHorizontally)) }
+                    val remaining = ((pairing.expiresAt ?: now) - now).coerceAtLeast(0) / 1_000
+                    Text("剩余有效时间：${remaining} 秒")
+                    Text("等待对方加入…")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onCancel) { Text("取消邀请") }
+                        Button(onClick = onRegenerate) { Text("重新生成") }
+                    }
                 }
-            }
-
-            if (isReconnecting) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = "断线自动重连中…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
-                )
-            }
-
-            HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-            Text(
-                text = "连接诊断",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            DiagnosticRow("WebSocket 状态", connectionDebugStateName(connectionState))
-            DiagnosticRow("最近断开原因", lastDisconnectReason)
-            DiagnosticRow("最近断开时间", formatDisconnectTime(lastDisconnectAtMillis))
-            DiagnosticRow("App 前后台", if (isAppInForeground) "foreground" else "background")
-            DiagnosticRow("正在自动重连", isReconnecting.toString())
-            DiagnosticRow("最近重连结果", lastReconnectResult)
-            DiagnosticRow("Foreground Service", if (isServiceRunning) "running" else "stopped")
-            DiagnosticRow("常驻通知状态", foregroundNotificationText)
-        }
-    }
-}
-
-@Composable
-private fun ActionsCard(onClearCounts: () -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            SectionTitle("操作")
-            Spacer(modifier = Modifier.height(8.dp))
-            Button(
-                onClick = onClearCounts,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error
-                ),
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Text("清空本机计数（功德 + 收到提醒）")
+                PairingStage.WAITING_FOR_SAS, PairingStage.WAITING_FOR_PEER_CONFIRMATION -> {
+                    Text("安全码", style = MaterialTheme.typography.labelLarge)
+                    Text(pairing.sas.orEmpty(), style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold)
+                    Text("请通过当面或语音核对。只有双方都确认后才会保存长期配对。")
+                    if (pairing.stage == PairingStage.WAITING_FOR_SAS) {
+                        Button(onClick = onConfirm, enabled = !pairing.busy) { Text("代码一致") }
+                        OutlinedButton(onClick = onReject, enabled = !pairing.busy) { Text("代码不一致") }
+                    } else Text("已确认，等待对方确认…")
+                }
+                PairingStage.PAIRED -> {
+                    Text("已安全配对", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    Text("对方设备：${storedPair?.peerDeviceName ?: pairing.peerName.orEmpty()}")
+                    Text("连接状态：${connectionLabel(connectionState)}")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (connectionState == ConnectionState.CONNECTED) {
+                            OutlinedButton(onClick = onDisconnect) { Text("断开连接") }
+                        } else Button(onClick = onConnect) { Text("连接") }
+                        OutlinedButton(onClick = onRevoke) { Text("解除配对") }
+                    }
+                }
+                PairingStage.REVOKED -> Text("配对已撤销，请重新配对")
             }
         }
     }
 }
 
 @Composable
-private fun AboutCard() {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp)
-        ) {
-            SectionTitle("关于")
-            Spacer(modifier = Modifier.height(8.dp))
-            Text("电子木鱼", style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = "版本 0.6.0 — 连接配置 MVP",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "双人极简提醒器",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "点一下木鱼，功德 +1，音效 + 震动",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun SettingSwitchRow(
-    label: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+private fun PreferenceCard(
+    sound: Boolean,
+    vibration: Boolean,
+    notifications: Boolean,
+    notificationPermission: Boolean,
+    onSound: (Boolean) -> Unit,
+    onVibration: (Boolean) -> Unit,
+    onNotification: (Boolean) -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(label, style = MaterialTheme.typography.bodyLarge)
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@Composable
-private fun SectionTitle(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleMedium,
-        fontWeight = FontWeight.Bold
-    )
-}
-
-private fun validateServerUrl(serverUrl: String): String? {
-    if (serverUrl.isBlank()) return "服务器地址不能为空"
-    if (serverUrl.length > MAX_SERVER_URL_LENGTH) {
-        return "服务器地址不能超过 $MAX_SERVER_URL_LENGTH 个字符"
-    }
-
-    return try {
-        val uri = serverUrl.toUri()
-        val scheme = uri.scheme?.lowercase()
-        when {
-            scheme != "ws" && scheme != "wss" -> "必须以 ws:// 或 wss:// 开头"
-            uri.host.isNullOrBlank() -> "服务器地址必须包含主机名或 IP"
-            !uri.encodedUserInfo.isNullOrEmpty() -> "服务器地址不能包含用户名或密码"
-            uri.fragment != null -> "服务器地址不能包含 #fragment"
-            !LocalDataStore.canStoreConnectionUrl(serverUrl) ->
-                "服务器地址不能包含 token、session、密码等敏感凭据"
-            uri.port == 0 || uri.port > 65535 -> "服务器端口必须为 1-65535"
-            else -> null
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            Text("提醒反馈", fontWeight = FontWeight.Bold)
+            Toggle("声音", sound, onSound)
+            Toggle("振动", vibration, onVibration)
+            Toggle("后台和锁屏通知", notifications, onNotification)
+            if (!notificationPermission) Text("系统通知权限尚未授予", style = MaterialTheme.typography.bodySmall)
         }
-    } catch (_: Exception) {
-        "服务器地址格式无效"
-    }
-}
-
-private fun validateRoomId(roomId: String): String? {
-    return when {
-        roomId.isBlank() -> "房间 ID 不能为空"
-        roomId.length > MAX_ROOM_ID_LENGTH -> "房间 ID 不能超过 $MAX_ROOM_ID_LENGTH 个字符"
-        roomId.any { it.code in 0..31 || it.code == 127 } -> "房间 ID 不能包含控制字符"
-        else -> null
-    }
-}
-
-private fun connectionDisplayName(state: ConnectionState): String {
-    return when (state) {
-        ConnectionState.CONNECTED -> "已连接"
-        ConnectionState.CONNECTING -> "连接中"
-        ConnectionState.RECONNECTING -> "重连中"
-        ConnectionState.DISCONNECTED -> "未连接"
-        ConnectionState.UNPAIRED -> "未配对"
-        ConnectionState.PAIRING -> "配对中"
-        ConnectionState.PAIRED -> "已配对"
-        ConnectionState.PAIR_FAILED -> "配对失败"
-        ConnectionState.CONNECTION_FAILED -> "连接失败"
-        ConnectionState.PARTNER_OFFLINE -> "对方离线"
-    }
-}
-
-private fun connectionDisplayColor(state: ConnectionState): Color {
-    return when (state) {
-        ConnectionState.CONNECTED -> Color(0xFF4CAF50)
-        ConnectionState.CONNECTING -> Color(0xFFFFC107)
-        ConnectionState.RECONNECTING -> Color(0xFFFFC107)
-        ConnectionState.DISCONNECTED -> Color(0xFF9E9E9E)
-        ConnectionState.UNPAIRED -> Color(0xFFFF9800)
-        ConnectionState.PAIRING -> Color(0xFFFFC107)
-        ConnectionState.PAIRED -> Color(0xFF4CAF50)
-        ConnectionState.PAIR_FAILED -> Color(0xFFF44336)
-        ConnectionState.CONNECTION_FAILED -> Color(0xFFF44336)
-        ConnectionState.PARTNER_OFFLINE -> Color(0xFFFF9800)
     }
 }
 
 @Composable
-private fun DiagnosticRow(label: String, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.padding(start = 12.dp)
-        )
+private fun Toggle(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, Modifier.weight(1f))
+        Switch(checked, onCheckedChange = onChange)
     }
 }
 
-private fun connectionDebugStateName(state: ConnectionState): String {
-    return when (state) {
-        ConnectionState.CONNECTING -> "connecting"
-        ConnectionState.CONNECTED -> "connected"
-        ConnectionState.RECONNECTING -> "reconnecting"
-        ConnectionState.DISCONNECTED,
-        ConnectionState.UNPAIRED,
-        ConnectionState.PAIRING,
-        ConnectionState.PAIRED,
-        ConnectionState.PAIR_FAILED,
-        ConnectionState.CONNECTION_FAILED,
-        ConnectionState.PARTNER_OFFLINE -> "disconnected"
+@Composable
+private fun DeveloperRelayCard(current: String, onSave: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    var value by remember(current) { mutableStateOf(current) }
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp)) {
+            TextButton(onClick = { expanded = !expanded }) { Text("开发者 / 高级设置") }
+            if (expanded) {
+                Text("仅 Debug 构建可覆盖 relay。二维码不会携带服务器地址。")
+                OutlinedTextField(value, { value = it }, label = { Text("调试 relay base URL") }, modifier = Modifier.fillMaxWidth())
+                Button(onClick = { onSave(value) }) { Text("保存调试地址") }
+            }
+        }
     }
 }
 
-private fun formatDisconnectTime(millis: Long?): String {
-    if (millis == null) return "none"
-    return SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(millis))
+private fun connectionLabel(state: ConnectionState): String = when (state) {
+    ConnectionState.CONNECTING -> "正在连接"
+    ConnectionState.AUTHENTICATING -> "正在认证"
+    ConnectionState.CONNECTED -> "已连接"
+    ConnectionState.RECONNECTING -> "正在重连"
+    ConnectionState.AUTHENTICATION_FAILED -> "认证失败"
+    ConnectionState.REVOKED -> "配对已撤销"
+    else -> "已配对但未连接"
 }

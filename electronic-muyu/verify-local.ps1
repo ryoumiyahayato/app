@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $serverRoot = Join-Path $projectRoot 'server'
+$cloudflareRelayRoot = Join-Path $projectRoot 'cloudflare-relay'
 $verificationStartedAtUtc = [DateTime]::UtcNow
 $relayLogs = [System.Collections.Generic.List[object]]::new()
 
@@ -320,6 +321,15 @@ try {
         Invoke-Native npm.cmd audit --omit=dev --audit-level=low
         Invoke-RelayVerificationPhase -Phase 'no-auth' -TargetPort $Port -Token ''
         Invoke-RelayVerificationPhase -Phase 'auth' -TargetPort ($Port + 1) -Token $RelayToken
+    } finally {
+        Pop-Location
+    }
+
+    Push-Location $cloudflareRelayRoot
+    try {
+        Invoke-Native npm.cmd ci
+        Invoke-Native npm.cmd run check
+        Invoke-Native npm.cmd run test:integration
     } finally {
         Pop-Location
     }

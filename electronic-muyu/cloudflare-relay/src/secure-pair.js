@@ -76,7 +76,10 @@ export class SecurePair extends DurableObject {
 
     const existing = await this.ctx.storage.get("pair");
     if (existing) {
+      const sameDevices = JSON.stringify(existing.devices) === JSON.stringify(input.devices);
       return existing.pairId === input.pairId
+        && existing.status === "paired"
+        && sameDevices
         ? jsonResponse({ ok: true, status: existing.status })
         : errorResponse(409, "pair_conflict");
     }

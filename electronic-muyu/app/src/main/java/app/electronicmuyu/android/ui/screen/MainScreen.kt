@@ -248,6 +248,7 @@ private fun ConnectionIndicator(state: ConnectionState) {
         ConnectionState.PAIR_FAILED -> "配对失败" to Color(0xFFF44336)
         ConnectionState.CONNECTION_FAILED -> "连接失败" to Color(0xFFF44336)
         ConnectionState.PARTNER_OFFLINE -> "对方离线" to Color(0xFFFF9800)
+        else -> "安全连接" to Color(0xFFFFC107)
     }
 
     Row(

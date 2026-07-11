@@ -2,474 +2,559 @@ package app.electronicmuyu.android.viewmodel
 
 import android.app.Application
 import android.content.Intent
+import android.os.Build
 import androidx.core.content.ContextCompat
-import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.electronicmuyu.android.BuildConfig
 import app.electronicmuyu.android.audio.SoundManager
 import app.electronicmuyu.android.data.LocalDataStore
 import app.electronicmuyu.android.model.ConnectionState
+import app.electronicmuyu.android.network.PairingApi
+import app.electronicmuyu.android.network.PairingApiException
+import app.electronicmuyu.android.network.RelayConfiguration
 import app.electronicmuyu.android.network.WebSocketClient
 import app.electronicmuyu.android.notification.NotificationHelper
+import app.electronicmuyu.android.pairing.InviteQrPayload
+import app.electronicmuyu.android.pairing.PairMetadata
+import app.electronicmuyu.android.pairing.PairSecrets
+import app.electronicmuyu.android.pairing.PairingStage
+import app.electronicmuyu.android.pairing.PairingTranscript
+import app.electronicmuyu.android.pairing.PairingUiState
+import app.electronicmuyu.android.security.Base64Url
+import app.electronicmuyu.android.security.PairingCrypto
+import app.electronicmuyu.android.security.SecureSecretStore
 import app.electronicmuyu.android.service.MuyuConnectionRepository
 import app.electronicmuyu.android.service.MuyuForegroundService
 import app.electronicmuyu.android.vibration.VibrationManager
+import java.security.KeyPair
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import okhttp3.Request
-import java.util.UUID
+import okhttp3.OkHttpClient
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    private val localDataStore = LocalDataStore(application)
+    private enum class Role { INVITER, JOINER }
+    private data class PendingPairing(
+        val role: Role,
+        val inviteId: String,
+        val sessionToken: String,
+        val keyPair: KeyPair,
+        val qrInvite: InviteQrPayload? = null,
+        var transcript: PairingTranscript? = null,
+        var accessToken: String? = null,
+        var localConfirmed: Boolean = false
+    )
+
+    private val dataStore = LocalDataStore(application)
+    private val secretStore = SecureSecretStore()
+    private val soundManager = SoundManager(application)
+    private val vibrationManager = VibrationManager(application)
+    private val pairingHttpClient = OkHttpClient()
+    private var pending: PendingPairing? = null
+    private var pollingJob: Job? = null
+    private var autoConnectAttempted = false
 
     private val _meriCount = MutableStateFlow(0)
     val meriCount: StateFlow<Int> = _meriCount.asStateFlow()
-
     private val _receivedCount = MutableStateFlow(0)
     val receivedCount: StateFlow<Int> = _receivedCount.asStateFlow()
-
     private val _soundEnabled = MutableStateFlow(true)
     val soundEnabled: StateFlow<Boolean> = _soundEnabled.asStateFlow()
-
     private val _vibrationEnabled = MutableStateFlow(true)
     val vibrationEnabled: StateFlow<Boolean> = _vibrationEnabled.asStateFlow()
-
     private val _notificationEnabled = MutableStateFlow(false)
     val notificationEnabled: StateFlow<Boolean> = _notificationEnabled.asStateFlow()
-
-    val connectionState: StateFlow<ConnectionState> = MuyuConnectionRepository.connectionState
-    val lastError: StateFlow<String> = MuyuConnectionRepository.lastError
-
-    private val _deviceId = MutableStateFlow("")
-    val deviceId: StateFlow<String> = _deviceId.asStateFlow()
-
-    private val _deviceIdDisplay = MutableStateFlow("")
-    val deviceIdDisplay: StateFlow<String> = _deviceIdDisplay.asStateFlow()
-
-    private val _serverUrl = MutableStateFlow(DEFAULT_SERVER_URL)
-    val serverUrl: StateFlow<String> = _serverUrl.asStateFlow()
-
-    private val _roomId = MutableStateFlow(DEFAULT_ROOM_ID)
-    val roomId: StateFlow<String> = _roomId.asStateFlow()
-
-    private val _lastTappedTime = MutableStateFlow<Long?>(null)
-    val lastTappedTime: StateFlow<Long?> = _lastTappedTime.asStateFlow()
-
-    private val _lastReceivedTime = MutableStateFlow<Long?>(null)
-    val lastReceivedTime: StateFlow<Long?> = _lastReceivedTime.asStateFlow()
-
     private val _lastReceivedEvent = MutableStateFlow<Long?>(null)
     val lastReceivedEvent: StateFlow<Long?> = _lastReceivedEvent.asStateFlow()
+    private val _pairingUiState = MutableStateFlow(PairingUiState())
+    val pairingUiState: StateFlow<PairingUiState> = _pairingUiState.asStateFlow()
+    private val _storedPair = MutableStateFlow<PairMetadata?>(null)
+    val storedPair: StateFlow<PairMetadata?> = _storedPair.asStateFlow()
+    private val _debugRelayOverride = MutableStateFlow("")
+    val debugRelayOverride: StateFlow<String> = _debugRelayOverride.asStateFlow()
 
-    private val _wsEnabled = MutableStateFlow(false)
-    val wsEnabled: StateFlow<Boolean> = _wsEnabled.asStateFlow()
-
-    val lastDisconnectReason: StateFlow<WebSocketClient.DisconnectReason> =
-        MuyuConnectionRepository.lastDisconnectReason
-    val lastDisconnectAtMillis: StateFlow<Long?> = MuyuConnectionRepository.lastDisconnectAtMillis
-    val isReconnecting: StateFlow<Boolean> = MuyuConnectionRepository.isReconnecting
-    val lastReconnectResult: StateFlow<String> = MuyuConnectionRepository.lastReconnectResult
-    val isServiceRunning: StateFlow<Boolean> = MuyuConnectionRepository.isServiceRunning
-    val foregroundNotificationText: StateFlow<String> =
-        MuyuConnectionRepository.foregroundNotificationText
-    val isAppInForeground: StateFlow<Boolean> = MuyuConnectionRepository.appForeground
-
-    private val soundManager = SoundManager(application)
-    private val vibrationManager = VibrationManager(application)
-    private var connectionStartPending = false
-    private var connectionRequestGeneration = 0L
-
-    companion object {
-        const val DEFAULT_SERVER_URL = "ws://192.168.96.33:8443"
-        const val DEFAULT_ROOM_ID = "test-room"
-        private const val MAX_ROOM_ID_LENGTH = 64
-        private const val MAX_SERVER_URL_LENGTH = 2048
-        private const val MAX_UI_EVENT_AGE_MS = 10_000L
-    }
+    val allowRelayOverride: Boolean = BuildConfig.ALLOW_RELAY_OVERRIDE
+    val connectionState: StateFlow<ConnectionState> = MuyuConnectionRepository.connectionState
+    val lastError: StateFlow<String> = MuyuConnectionRepository.lastError
+    val lastDisconnectReason = MuyuConnectionRepository.lastDisconnectReason
+    val lastDisconnectAtMillis = MuyuConnectionRepository.lastDisconnectAtMillis
+    val isReconnecting = MuyuConnectionRepository.isReconnecting
+    val lastReconnectResult = MuyuConnectionRepository.lastReconnectResult
+    val isServiceRunning = MuyuConnectionRepository.isServiceRunning
+    val foregroundNotificationText = MuyuConnectionRepository.foregroundNotificationText
+    val isAppInForeground = MuyuConnectionRepository.appForeground
+    val wsEnabled = MuyuConnectionRepository.isServiceRunning
 
     init {
         viewModelScope.launch {
-            try {
-                if (localDataStore.purgeUnsafeConnectionConfig()) {
-                    MuyuConnectionRepository.setLastError("已移除不安全的旧连接配置")
-                }
-            } catch (_: Exception) {
+            try { dataStore.prepareLegacyMigration() } catch (_: Exception) {
                 MuyuConnectionRepository.setLastError("旧连接配置安全检查失败")
             }
         }
+        viewModelScope.launch { dataStore.meriCount.collect { _meriCount.value = it } }
+        viewModelScope.launch { dataStore.receivedCount.collect { _receivedCount.value = it } }
+        viewModelScope.launch { dataStore.soundEnabled.collect { _soundEnabled.value = it } }
+        viewModelScope.launch { dataStore.vibrationEnabled.collect { _vibrationEnabled.value = it } }
+        viewModelScope.launch { dataStore.notificationEnabled.collect { _notificationEnabled.value = it } }
+        viewModelScope.launch { dataStore.debugRelayOverride.collect { _debugRelayOverride.value = it } }
         viewModelScope.launch {
-            localDataStore.meriCount.collect { _meriCount.value = it }
-        }
-        viewModelScope.launch {
-            localDataStore.receivedCount.collect { _receivedCount.value = it }
-        }
-        viewModelScope.launch {
-            localDataStore.soundEnabled.collect { _soundEnabled.value = it }
-        }
-        viewModelScope.launch {
-            localDataStore.vibrationEnabled.collect { _vibrationEnabled.value = it }
-        }
-        viewModelScope.launch {
-            localDataStore.notificationEnabled.collect { _notificationEnabled.value = it }
-        }
-        viewModelScope.launch {
-            try {
-                resolveDeviceId()
-            } catch (_: Exception) {
-                MuyuConnectionRepository.setLastError("无法初始化设备标识")
-            }
-        }
-        viewModelScope.launch {
-            localDataStore.wsUrl.collect { savedUrl ->
-                _serverUrl.value = savedUrl.ifEmpty { DEFAULT_SERVER_URL }
-            }
-        }
-        viewModelScope.launch {
-            localDataStore.roomId.collect { savedRoomId ->
-                _roomId.value = savedRoomId.ifEmpty { DEFAULT_ROOM_ID }
+            combine(dataStore.storedPair, dataStore.legacyConfigurationDetected) { pair, legacy ->
+                pair to legacy
+            }.collect { (pair, legacy) ->
+                _storedPair.value = pair?.metadata
+                if (pending == null) {
+                    _pairingUiState.value = if (pair == null) {
+                        PairingUiState(
+                            stage = PairingStage.UNPAIRED,
+                            legacyDetected = legacy,
+                            message = if (legacy) "旧连接方式不再安全，请重新扫码配对。" else ""
+                        )
+                    } else {
+                        PairingUiState(
+                            stage = PairingStage.PAIRED,
+                            peerName = pair.metadata.peerDeviceName,
+                            legacyDetected = false
+                        )
+                    }
+                }
+                if (pair != null && !autoConnectAttempted) {
+                    autoConnectAttempted = true
+                    startConnection()
+                }
             }
         }
         viewModelScope.launch {
             combine(
                 MuyuConnectionRepository.pendingReceivedTapUiEvents,
                 MuyuConnectionRepository.uiForeground
-            ) { events, isUiForeground ->
-                events to isUiForeground
-            }.collect { (events, isUiForeground) ->
-                if (events.isEmpty() || !isUiForeground) return@collect
-
-                val eventIds = events.map { it.id }
+            ) { events, foreground -> events to foreground }.collect { (events, foreground) ->
+                if (!foreground || events.isEmpty()) return@collect
+                val ids = events.map { it.id }
                 try {
                     val now = System.currentTimeMillis()
                     events.forEach { event ->
-                        val age = now - event.receivedAtMillis
-                        if (age in 0L..MAX_UI_EVENT_AGE_MS) {
-                            _lastReceivedTime.value = event.receivedAtMillis
+                        if (now - event.receivedAtMillis in 0L..10_000L) {
                             _lastReceivedEvent.value = event.id
                             playSoundAndVibrate()
                         }
                     }
                 } finally {
-                    MuyuConnectionRepository.consumeReceivedTapUiEvents(eventIds)
+                    MuyuConnectionRepository.consumeReceivedTapUiEvents(ids)
                 }
             }
         }
+    }
+
+    fun createInvite() {
+        if (_storedPair.value != null || pending != null) return
         viewModelScope.launch {
-            MuyuConnectionRepository.isServiceRunning.collect { isRunning ->
-                _wsEnabled.value = isRunning
+            _pairingUiState.value = PairingUiState(PairingStage.CREATING_INVITE, busy = true)
+            try {
+                val api = requireApi()
+                val deviceId = resolveDeviceId()
+                val keyPair = PairingCrypto.generateKeyPair()
+                val inviteId = PairingCrypto.randomBase64Url(16)
+                val inviteSecret = PairingCrypto.randomBase64Url(32)
+                val publicKey = Base64Url.encode(keyPair.public.encoded)
+                val created = api.createInvite(
+                    inviteId,
+                    PairingCrypto.sha256Base64Url(inviteSecret),
+                    deviceId,
+                    deviceName(),
+                    publicKey
+                )
+                val qr = InviteQrPayload(inviteId, inviteSecret, publicKey, created.expiresAt)
+                pending = PendingPairing(Role.INVITER, inviteId, created.ownerSessionToken, keyPair, qr)
+                _pairingUiState.value = PairingUiState(
+                    stage = PairingStage.WAITING_FOR_SCAN,
+                    qrPayload = qr.encode(),
+                    expiresAt = created.expiresAt,
+                    message = "等待对方扫描"
+                )
+                startPolling()
+            } catch (error: Exception) {
+                failPairing(userFacing(error))
             }
+        }
+    }
+
+    fun acceptScannedQr(raw: String) {
+        if (_storedPair.value != null || pending != null) return
+        val qr = InviteQrPayload.decode(raw)
+        if (qr == null) {
+            failPairing("二维码无效、已过期或不是电子木鱼配对码")
+            return
+        }
+        viewModelScope.launch {
+            _pairingUiState.value = PairingUiState(PairingStage.JOINING, busy = true, message = "正在建立安全连接")
+            try {
+                val api = requireApi()
+                val deviceId = resolveDeviceId()
+                val keyPair = PairingCrypto.generateKeyPair()
+                val joined = api.joinInvite(
+                    qr.inviteId,
+                    qr.inviteSecret,
+                    deviceId,
+                    deviceName(),
+                    Base64Url.encode(keyPair.public.encoded)
+                )
+                val transcript = requireNotNull(joined.transcript)
+                require(transcript.inviteId == qr.inviteId &&
+                    transcript.inviter.publicKey == qr.inviterPublicKey
+                ) { "pairing transcript mismatch" }
+                pending = PendingPairing(
+                    Role.JOINER,
+                    qr.inviteId,
+                    requireNotNull(joined.joinSessionToken),
+                    keyPair,
+                    qr,
+                    transcript
+                )
+                showSas(transcript)
+            } catch (error: Exception) {
+                failPairing(userFacing(error))
+            }
+        }
+    }
+
+    fun confirmSas() {
+        val active = pending ?: return
+        val transcript = active.transcript ?: return
+        if (active.localConfirmed) return
+        viewModelScope.launch {
+            _pairingUiState.value = _pairingUiState.value.copy(busy = true)
+            try {
+                val token = active.accessToken ?: PairingCrypto.randomBase64Url(32).also {
+                    active.accessToken = it
+                }
+                val status = requireApi().statusOrConfirm(
+                    active.inviteId,
+                    localDevice(active, transcript).deviceId,
+                    active.sessionToken,
+                    "confirm",
+                    PairingCrypto.sha256Base64Url(token)
+                )
+                active.localConfirmed = true
+                if (status.status == "paired") finalizePairing(active, requireNotNull(status.transcript))
+                else {
+                    _pairingUiState.value = _pairingUiState.value.copy(
+                        stage = PairingStage.WAITING_FOR_PEER_CONFIRMATION,
+                        busy = false,
+                        message = "已确认，等待对方确认"
+                    )
+                    startPolling()
+                }
+            } catch (error: Exception) {
+                failPairing(userFacing(error))
+            }
+        }
+    }
+
+    fun rejectSas() {
+        val active = pending ?: return
+        val transcript = active.transcript
+        viewModelScope.launch {
+            try {
+                if (transcript != null) requireApi().statusOrConfirm(
+                    active.inviteId,
+                    localDevice(active, transcript).deviceId,
+                    active.sessionToken,
+                    "reject"
+                )
+            } catch (_: Exception) {
+                // Local temporary material is cleared even if the rejection request cannot be delivered.
+            } finally {
+                clearPending()
+                failPairing("安全码不一致，临时配对已清除")
+            }
+        }
+    }
+
+    fun cancelInvite() {
+        val active = pending ?: return
+        viewModelScope.launch {
+            try {
+                if (active.role == Role.INVITER) requireApi().cancelInvite(
+                    active.inviteId,
+                    resolveDeviceId(),
+                    active.sessionToken
+                )
+            } catch (_: Exception) {
+                // Clearing local one-time material is always safe.
+            } finally {
+                clearPending()
+                _pairingUiState.value = PairingUiState(PairingStage.UNPAIRED)
+            }
+        }
+    }
+
+    fun regenerateInvite() {
+        cancelInvite()
+        viewModelScope.launch {
+            while (pending != null) delay(25)
+            createInvite()
+        }
+    }
+
+    fun revokePairing() {
+        val metadata = _storedPair.value ?: return
+        viewModelScope.launch {
+            _pairingUiState.value = PairingUiState(PairingStage.PAIRED, peerName = metadata.peerDeviceName, busy = true)
+            try {
+                val stored = dataStore.storedPair.first() ?: error("pair unavailable")
+                val secrets = PairSecrets.fromJson(secretStore.decrypt(stored.encryptedSecrets))
+                    ?: error("pair secrets unavailable")
+                try {
+                    requireApi().revokePair(metadata.pairId, metadata.deviceId, secrets.accessToken)
+                } catch (error: PairingApiException) {
+                    if (error.status !in setOf(404, 410)) throw error
+                }
+                stopConnection()
+                dataStore.clearSecurePair()
+                secretStore.deleteKey()
+                _storedPair.value = null
+                _pairingUiState.value = PairingUiState(PairingStage.UNPAIRED)
+            } catch (error: Exception) {
+                _pairingUiState.value = PairingUiState(
+                    PairingStage.PAIRED,
+                    peerName = metadata.peerDeviceName,
+                    message = "解除配对失败；本机凭据已保留，避免产生无法撤销的孤立凭据"
+                )
+            }
+        }
+    }
+
+    fun saveDebugRelayOverride(value: String) {
+        if (!BuildConfig.ALLOW_RELAY_OVERRIDE) return
+        viewModelScope.launch {
+            val normalized = value.trim()
+            if (normalized.isNotEmpty() && PairingApi.validateRelayBaseUrl(normalized, true) == null) {
+                MuyuConnectionRepository.setLastError("调试 relay 必须是 HTTPS，或本机/模拟器回环 HTTP")
+                return@launch
+            }
+            dataStore.setDebugRelayOverride(normalized.ifEmpty { null })
+            _debugRelayOverride.value = normalized
         }
     }
 
     fun startConnection() {
-        if (
-            connectionStartPending ||
-            _wsEnabled.value ||
-            MuyuConnectionRepository.isServiceRunning.value
-        ) {
-            return
-        }
-
-        val requestGeneration = ++connectionRequestGeneration
-        connectionStartPending = true
-        MuyuConnectionRepository.setLastError("")
-        MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
-
-        val currentDeviceId = _deviceId.value
-        if (currentDeviceId.isNotBlank()) {
-            startConnectionWithDeviceId(currentDeviceId, requestGeneration)
-            connectionStartPending = false
-            return
-        }
-
-        viewModelScope.launch {
-            try {
-                val resolvedDeviceId = resolveDeviceId()
-                if (requestGeneration == connectionRequestGeneration) {
-                    startConnectionWithDeviceId(resolvedDeviceId, requestGeneration)
-                }
-            } catch (_: Exception) {
-                if (requestGeneration == connectionRequestGeneration) {
-                    failConnectionStart("无法初始化设备标识")
-                }
-            } finally {
-                if (requestGeneration == connectionRequestGeneration) {
-                    connectionStartPending = false
-                }
-            }
-        }
-    }
-
-    private fun startConnectionWithDeviceId(
-        deviceIdValue: String,
-        requestGeneration: Long
-    ) {
-        if (requestGeneration != connectionRequestGeneration) return
-
-        val roomIdValue = _roomId.value.trim()
-        val fullUrl = buildWebSocketUrl(_serverUrl.value, roomIdValue)
-
-        if (deviceIdValue.isBlank() || fullUrl == null) {
-            failConnectionStart("连接配置无效，请检查服务器地址和房间 ID")
-            return
-        }
-
-        MuyuConnectionRepository.setLastError("")
-        MuyuConnectionRepository.setConnectionState(ConnectionState.CONNECTING)
-
+        if (_storedPair.value == null || MuyuConnectionRepository.isServiceRunning.value) return
         val context = getApplication<Application>()
         val intent = Intent(context, MuyuForegroundService::class.java).apply {
             action = MuyuForegroundService.ACTION_START_CONNECT
-            putExtra(MuyuForegroundService.EXTRA_SERVER_URL, fullUrl)
-            putExtra(MuyuForegroundService.EXTRA_PAIR_ID, roomIdValue)
-            putExtra(MuyuForegroundService.EXTRA_DEVICE_ID, deviceIdValue)
         }
-
-        try {
-            ContextCompat.startForegroundService(context, intent)
-            if (requestGeneration == connectionRequestGeneration) {
-                _wsEnabled.value = true
-            }
-        } catch (_: Exception) {
-            if (requestGeneration == connectionRequestGeneration) {
-                failConnectionStart("无法启动连接服务")
-            }
+        try { ContextCompat.startForegroundService(context, intent) } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("无法启动安全连接服务")
         }
-    }
-
-    private fun failConnectionStart(message: String) {
-        _wsEnabled.value = false
-        MuyuConnectionRepository.setServiceRunning(false)
-        MuyuConnectionRepository.setReconnecting(false)
-        MuyuConnectionRepository.setLastError(message)
-        MuyuConnectionRepository.setDisconnectReason(
-            WebSocketClient.DisconnectReason.INVALID_CONFIG,
-            System.currentTimeMillis()
-        )
-        MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
-        MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
-    }
-
-    private suspend fun resolveDeviceId(): String {
-        val resolvedId = localDataStore.getOrCreateDeviceId { UUID.randomUUID().toString() }
-        _deviceId.value = resolvedId
-        _deviceIdDisplay.value = resolvedId.take(8)
-        return resolvedId
     }
 
     fun stopConnection() {
-        connectionRequestGeneration++
-        connectionStartPending = false
-        _wsEnabled.value = false
-        if (!MuyuConnectionRepository.isServiceRunning.value) {
-            MuyuConnectionRepository.setReconnecting(false)
-            MuyuConnectionRepository.setLastReconnectResult("stopped: user_action")
-            MuyuConnectionRepository.setDisconnectReason(
-                WebSocketClient.DisconnectReason.USER_ACTION,
-                System.currentTimeMillis()
-            )
-            MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
-            MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
-            return
-        }
-
         val context = getApplication<Application>()
-        val intent = Intent(context, MuyuForegroundService::class.java).apply {
-            action = MuyuForegroundService.ACTION_DISCONNECT
-        }
         try {
-            context.startService(intent)
+            context.startService(Intent(context, MuyuForegroundService::class.java).apply {
+                action = MuyuForegroundService.ACTION_DISCONNECT
+            })
         } catch (_: Exception) {
             MuyuConnectionRepository.setServiceRunning(false)
-            MuyuConnectionRepository.setReconnecting(false)
             MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
-            MuyuConnectionRepository.setForegroundNotificationText("电子木鱼未连接")
         }
     }
 
     fun onTap() {
         val timestamp = System.currentTimeMillis()
-        _lastTappedTime.value = timestamp
         playSoundAndVibrate()
-
         viewModelScope.launch {
-            try {
-                localDataStore.incrementMeriCount()
-            } catch (_: Exception) {
+            try { dataStore.incrementMeriCount() } catch (_: Exception) {
                 MuyuConnectionRepository.setLastError("本机功德计数保存失败")
             }
         }
-
-        if (
-            MuyuConnectionRepository.isServiceRunning.value &&
-            MuyuConnectionRepository.connectionState.value == ConnectionState.CONNECTED
-        ) {
-            val context = getApplication<Application>()
-            val intent = Intent(context, MuyuForegroundService::class.java).apply {
-                action = MuyuForegroundService.ACTION_SEND_TAP
-                putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, timestamp)
-            }
+        if (connectionState.value == ConnectionState.CONNECTED) {
             try {
-                context.startService(intent)
+                getApplication<Application>().startService(
+                    Intent(getApplication(), MuyuForegroundService::class.java).apply {
+                        action = MuyuForegroundService.ACTION_SEND_TAP
+                        putExtra(MuyuForegroundService.EXTRA_TIMESTAMP, timestamp)
+                    }
+                )
             } catch (_: Exception) {
-                MuyuConnectionRepository.setLastError("提醒未发送：连接服务不可用")
-                MuyuConnectionRepository.setServiceRunning(false)
-                MuyuConnectionRepository.setConnectionState(ConnectionState.DISCONNECTED)
+                MuyuConnectionRepository.setLastError("提醒未发送：安全连接服务不可用")
             }
         }
     }
 
-    fun setSoundEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            try {
-                localDataStore.setSoundEnabled(enabled)
-                _soundEnabled.value = enabled
-            } catch (_: Exception) {
-                MuyuConnectionRepository.setLastError("声音设置保存失败")
-            }
+    fun setSoundEnabled(value: Boolean) = viewModelScope.launch {
+        try { dataStore.setSoundEnabled(value) } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("声音设置保存失败")
         }
     }
-
-    fun setVibrationEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            try {
-                localDataStore.setVibrationEnabled(enabled)
-                _vibrationEnabled.value = enabled
-            } catch (_: Exception) {
-                MuyuConnectionRepository.setLastError("震动设置保存失败")
-            }
+    fun setVibrationEnabled(value: Boolean) = viewModelScope.launch {
+        try { dataStore.setVibrationEnabled(value) } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("振动设置保存失败")
         }
     }
-
-    fun setNotificationEnabled(enabled: Boolean) {
-        viewModelScope.launch {
-            try {
-                localDataStore.setNotificationEnabled(enabled)
-                _notificationEnabled.value = enabled
-            } catch (_: Exception) {
-                MuyuConnectionRepository.setLastError("通知设置保存失败")
-            }
+    fun setNotificationEnabled(value: Boolean) = viewModelScope.launch {
+        try { dataStore.setNotificationEnabled(value) } catch (_: Exception) {
+            MuyuConnectionRepository.setLastError("通知设置保存失败")
         }
     }
-
-    suspend fun saveConnectionConfig(serverUrl: String, roomId: String): Boolean {
-        val normalizedUrl = serverUrl.trim()
-        val normalizedRoomId = roomId.trim()
-        if (buildWebSocketUrl(normalizedUrl, normalizedRoomId) == null) {
-            MuyuConnectionRepository.setLastError("连接配置无效，未保存")
-            return false
-        }
-
-        return try {
-            localDataStore.setConnectionConfig(normalizedUrl, normalizedRoomId)
-            _serverUrl.value = normalizedUrl
-            _roomId.value = normalizedRoomId
-            MuyuConnectionRepository.setLastError("")
-            true
-        } catch (_: Exception) {
-            MuyuConnectionRepository.setLastError("连接配置保存失败")
-            false
-        }
-    }
-
-    suspend fun resetConnectionConfig(): Boolean {
-        return try {
-            localDataStore.resetConnectionConfig()
-            _serverUrl.value = DEFAULT_SERVER_URL
-            _roomId.value = DEFAULT_ROOM_ID
-            MuyuConnectionRepository.setLastError("")
-            true
-        } catch (_: Exception) {
-            MuyuConnectionRepository.setLastError("默认连接配置恢复失败")
-            false
-        }
-    }
-
-    fun clearAllCounts() {
-        viewModelScope.launch {
-            try {
-                localDataStore.clearAllCounts()
-                MuyuConnectionRepository.clearPendingReceivedTapUiEvents()
-                _lastTappedTime.value = null
-                _lastReceivedTime.value = null
-                _lastReceivedEvent.value = null
-            } catch (_: Exception) {
-                MuyuConnectionRepository.setLastError("计数清空失败")
-            }
-        }
-    }
-
-    fun dismissReceivedEvent() {
+    fun clearAllCounts() = viewModelScope.launch {
+        dataStore.clearAllCounts()
+        MuyuConnectionRepository.clearPendingReceivedTapUiEvents()
         _lastReceivedEvent.value = null
     }
+    fun dismissReceivedEvent() { _lastReceivedEvent.value = null }
+    fun checkNotificationPermissionState(): Boolean = NotificationHelper.hasNotificationPermission(getApplication())
 
-    fun checkNotificationPermissionState(): Boolean {
-        return NotificationHelper.hasNotificationPermission(getApplication())
-    }
-
-    private fun buildWebSocketUrl(serverUrl: String, roomId: String): String? {
-        val trimmedServerUrl = serverUrl.trim()
-        val trimmedRoomId = roomId.trim()
-        if (
-            trimmedServerUrl.isEmpty() ||
-            trimmedServerUrl.length > MAX_SERVER_URL_LENGTH ||
-            !isValidRoomId(trimmedRoomId)
-        ) {
-            return null
-        }
-
-        return try {
-            val parsedUri = trimmedServerUrl.toUri()
-            val scheme = parsedUri.scheme?.lowercase()
-            if (
-                (scheme != "ws" && scheme != "wss") ||
-                parsedUri.host.isNullOrBlank() ||
-                !parsedUri.encodedUserInfo.isNullOrEmpty() ||
-                parsedUri.fragment != null ||
-                !LocalDataStore.canStoreConnectionUrl(trimmedServerUrl)
-            ) {
-                return null
-            }
-
-            val builder = parsedUri.buildUpon().clearQuery()
-            parsedUri.queryParameterNames
-                .filterNot { it == "room" }
-                .forEach { name ->
-                    parsedUri.getQueryParameters(name).forEach { value ->
-                        builder.appendQueryParameter(name, value)
-                    }
+    private fun startPolling() {
+        pollingJob?.cancel()
+        pollingJob = viewModelScope.launch {
+            while (true) {
+                delay(1_000)
+                val active = pending ?: return@launch
+                val current = _pairingUiState.value
+                if (current.expiresAt?.let { System.currentTimeMillis() >= it } == true) {
+                    clearPending()
+                    failPairing("邀请已过期，请重新生成")
+                    return@launch
                 }
-            builder.appendQueryParameter("room", trimmedRoomId)
-            val fullUrl = builder.build().toString()
-
-            Request.Builder().url(fullUrl).build()
-            fullUrl
-        } catch (_: Exception) {
-            null
+                try {
+                    val transcript = active.transcript
+                    val localId = transcript?.let { localDevice(active, it).deviceId } ?: resolveDeviceId()
+                    val status = requireApi().statusOrConfirm(
+                        active.inviteId, localId, active.sessionToken, "status"
+                    )
+                    status.transcript?.let {
+                        if (active.transcript == null) {
+                            active.transcript = it
+                            showSas(it)
+                        }
+                    }
+                    if (status.status == "paired" && active.localConfirmed) {
+                        finalizePairing(active, requireNotNull(status.transcript))
+                        return@launch
+                    }
+                } catch (error: PairingApiException) {
+                    if (error.status in setOf(404, 409, 410)) {
+                        clearPending()
+                        failPairing(userFacing(error))
+                        return@launch
+                    }
+                } catch (_: Exception) {
+                    // Transient polling failures keep the bounded invitation alive until expiry.
+                }
+            }
         }
     }
 
-    private fun isValidRoomId(roomId: String): Boolean {
-        return roomId.isNotEmpty() &&
-            roomId.length <= MAX_ROOM_ID_LENGTH &&
-            roomId.none { it.code in 0..31 || it.code == 127 }
+    private fun showSas(transcript: PairingTranscript) {
+        val active = pending ?: return
+        validateTranscript(active, transcript)
+        _pairingUiState.value = PairingUiState(
+            stage = PairingStage.WAITING_FOR_SAS,
+            expiresAt = transcript.expiresAt,
+            sas = PairingCrypto.computeSas(transcript),
+            peerName = peerDevice(active, transcript).deviceName,
+            message = "请通过当面或语音核对"
+        )
     }
 
+    private suspend fun finalizePairing(active: PendingPairing, transcript: PairingTranscript) {
+        validateTranscript(active, transcript)
+        val token = requireNotNull(active.accessToken)
+        val peer = peerDevice(active, transcript)
+        val local = localDevice(active, transcript)
+        val slot = if (active.role == Role.INVITER) 0 else 1
+        val shared = PairingCrypto.sharedSecret(active.keyPair.private, PairingCrypto.publicKey(peer.publicKey))
+        val directional = PairingCrypto.deriveDirectionalKeys(shared, transcript.pairId, slot)
+        shared.fill(0)
+        val secrets = PairSecrets(
+            privateKeyPkcs8 = Base64Url.encode(active.keyPair.private.encoded),
+            accessToken = token,
+            sendKey = Base64Url.encode(directional.sendKey),
+            receiveKey = Base64Url.encode(directional.receiveKey)
+        )
+        val encrypted = secretStore.encrypt(secrets.toJson())
+        directional.sendKey.fill(0)
+        directional.receiveKey.fill(0)
+        val metadata = PairMetadata(
+                pairId = transcript.pairId,
+                deviceId = local.deviceId,
+                peerDeviceId = peer.deviceId,
+                peerDeviceName = peer.deviceName,
+                slot = slot,
+                createdAt = System.currentTimeMillis()
+            )
+        dataStore.saveSecurePair(metadata, encrypted)
+        _storedPair.value = metadata
+        clearPending()
+        _pairingUiState.value = PairingUiState(PairingStage.PAIRED, peerName = peer.deviceName)
+        startConnection()
+    }
+
+    private fun validateTranscript(active: PendingPairing, transcript: PairingTranscript) {
+        require(transcript.inviteId == active.inviteId)
+        require(Base64Url.decode(transcript.pairId, 16) != null)
+        require(transcript.expiresAt > System.currentTimeMillis())
+        val local = localDevice(active, transcript)
+        require(local.publicKey == Base64Url.encode(active.keyPair.public.encoded))
+        require(transcript.inviter.deviceId != transcript.joiner.deviceId)
+    }
+
+    private fun localDevice(active: PendingPairing, transcript: PairingTranscript) =
+        if (active.role == Role.INVITER) transcript.inviter else transcript.joiner
+    private fun peerDevice(active: PendingPairing, transcript: PairingTranscript) =
+        if (active.role == Role.INVITER) transcript.joiner else transcript.inviter
+
+    private suspend fun resolveDeviceId(): String = dataStore.getOrCreateDeviceId {
+        PairingCrypto.randomBase64Url(16)
+    }
+    private fun deviceName(): String = Build.MODEL
+        .filterNot { it.code in 0..31 || it.code == 127 }
+        .trim()
+        .take(64)
+        .ifEmpty { "Android 设备" }
+    private suspend fun requireApi(): PairingApi = PairingApi(
+        RelayConfiguration.resolve(dataStore) ?: error("relay unavailable"),
+        pairingHttpClient
+    )
+    private fun userFacing(error: Exception): String = when (error) {
+        is PairingApiException -> when (error.errorCode) {
+            "invite_expired" -> "邀请已过期"
+            "invite_already_redeemed", "invite_already_used" -> "邀请已被使用"
+            "invalid_invite_secret" -> "配对二维码无效"
+            "pairing_rejected" -> "对方拒绝了安全码"
+            "invite_cancelled" -> "邀请已取消"
+            "rate_limited" -> "操作过于频繁，请稍后重试"
+            else -> "配对服务暂时不可用"
+        }
+        else -> if (error.message == "relay unavailable") "未配置有效的 relay 地址" else "无法完成安全配对"
+    }
+    private fun failPairing(message: String) {
+        _pairingUiState.value = PairingUiState(PairingStage.FAILED, message = message)
+        MuyuConnectionRepository.setLastError(message)
+    }
+    private fun clearPending() {
+        pollingJob?.cancel()
+        pollingJob = null
+        pending = null
+    }
     private fun playSoundAndVibrate() {
-        if (_soundEnabled.value) {
-            soundManager.playMuyuHit()
-        }
-        if (_vibrationEnabled.value) {
-            vibrationManager.shortTap()
-        }
+        if (_soundEnabled.value) soundManager.playMuyuHit()
+        if (_vibrationEnabled.value) vibrationManager.shortTap()
     }
 
     override fun onCleared() {
-        connectionRequestGeneration++
+        clearPending()
         soundManager.release()
+        pairingHttpClient.dispatcher.cancelAll()
+        pairingHttpClient.connectionPool.evictAll()
+        pairingHttpClient.dispatcher.executorService.shutdown()
         super.onCleared()
     }
 }
