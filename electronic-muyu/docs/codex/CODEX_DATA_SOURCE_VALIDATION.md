@@ -1,385 +1,702 @@
-# Codex 数据源可行性验证（C0 → C1）
+# Codex 数据源可行性验证（C0 → C1 → C1-LIVE）
 
-验证日期：2026-09-07（UTC）
+验证更新日期：2026-09-08（UTC）
 
 项目分支：`feat/codex-usage-integration`
 
 项目基线：`3536e62a6e656b0d7694f061b1365baf49859be6`
 
-状态：**C1 未通过 Android 集成 Gate；未实施 Collector、Room 或 UI**
+C1-LIVE 开始前远端 feature HEAD：`5ee858b73c8c740998accc5aacb8f5fca3d78188`
 
-## 结论
+状态：**只完成数据源验证与隔离 Probe；未实施正式 Collector、Android Room、Dashboard、Navigation、通知或生产 relay 变更。**
+
+## 当前结论
+
+C0/C1 已确认的协议结论保持不变：
 
 ```text
 QUOTA SOURCE: PARTIAL
 TOKEN SOURCE: PARTIAL
-MODEL-FREE COLLECTION: PASS
+MODEL-FREE COLLECTION PATH: PASS (source/protocol evidence)
 READY FOR ANDROID INTEGRATION: NO
 ```
 
-`MODEL-FREE COLLECTION: PASS` 只表示已确认的候选读取路径本身不需要创建 Codex
-task、thread 或 turn，也不需要调用 Responses/Chat Completions API。它不把本次开发过程中使用
-Codex 的行为算作成品运行时依赖。
-
-当前不能进入 C2，原因不是缺少 Dashboard，而是本执行环境未能完成一次真实账户的
-`account/rateLimits/read` / `account/usage/read` 往返，也没有可用于验证跨重启、重复通知和本地
-rollout 增量扫描的桌面 Codex 会话样本。协议和实现证据证明数据通路存在，但尚不足以证明它在
-目标电脑、目标账号和实际网络条件下“稳定、持续”。
-
-此外，即使活体请求成功，当前协议仍不能用单一数据源完整提供“逐次 token + 原始发生时间 +
-模型 + sessionId”。实现必须组合账户 quota、实时 thread 通知和本地 rollout，并保留未知值为
-`null`。
-
-## C0 — Repository audit
-
-### Git 基线
-
-- 从 `https://github.com/ryoumiyahayato/app.git` 全新克隆。
-- 显式执行 `git fetch --prune origin` 后，`origin/main` 与本地 `main` 都是
-  `3536e62a6e656b0d7694f061b1365baf49859be6`。
-- 该提交为 `fix: hold transient taps until peer reconnects`，提交时间
-  `2026-07-11T17:18:15Z`。
-- 开始时工作树干净；远端只有 `main`，没有已有 Codex feature branch。
-- 已从 `origin/main` 新建 `feat/codex-usage-integration`，不修改 `main`，不改历史。
-
-### 当前 Android 实现
-
-- Kotlin、Jetpack Compose、Material 3，`minSdk 26`、`compileSdk/targetSdk 36`，JDK 17。
-- `MainActivity` 创建通知渠道、维护前后台状态，并在一个 Compose `NavHost` 中注册
-  `main`、`settings`、`scanner`。
-- `MainScreen` 保持木鱼按钮、功德/接收计数、连接/对端状态和设置入口的极简首页。
-- `MainViewModel` 当前集中负责 DataStore 状态、配对流程、设置、计数和 Service 命令；文件已达
-  574 行。Codex 后续不得继续塞入该 ViewModel。
-- `LocalDataStore` 使用 Preferences DataStore 保存计数、设置、设备 ID、配对 metadata、加密
-  secret blob、严格单调的发送/接收 counter 和 debug relay override。
-- `MuyuForegroundService` 是唯一的长期连接所有者，实例化 `WebSocketClient`，处理重连、对端
-  presence、10 秒 pending tap queue、加解密、重放检查、前台服务通知和后台提醒。
-- `MuyuConnectionRepository` 是进程内 StateFlow 状态桥，不是历史数据库。
-- `WebSocketClient` 使用 OkHttp WebSocket；只有严格校验 `auth_ok` 后才进入 connected，网络、
-  server close 和 4408 会退避重连，认证失败/撤销/协议拒绝为终止性错误。
-- `NotificationHelper` 当前只有 `merit_reminder` 渠道；Codex 通知后续需要独立渠道、ID 和状态。
-
-### 当前 pairing / crypto / relay 安全边界
-
-- secure pairing 协议版本为 1；QR 是一次性 120 秒邀请，双方核对 6 位 SAS 后才建立长期配对。
-- P-256 ECDH + HKDF-SHA256 派生方向密钥；tap envelope 使用 AES-256-GCM，并把 version、
-  pairId、sender、严格递增 counter 绑定为 AAD。
-- P-256 私钥、设备 access token、send/receive key 被 Android Keystore 中非导出的 AES key 包装；
-  DataStore 不保存明文秘密。
-- Android 和 Worker 都检查 counter；Worker 只转发密文，不解析 tap 明文，不保存消息历史，也不
-  提供离线队列。
-- Cloudflare relay 使用 `InvitationSession`、`SecurePair`、`RequestRateLimiter` 和隔离的 legacy
-  `PairRoom` Durable Objects；`ALLOW_LEGACY` 默认 `false`。
-- 生产 relay URL 由 BuildConfig 注入，默认 `https://relay.invalid`；Release 不允许覆盖，Debug
-  只允许 HTTPS 或受限 loopback HTTP。
-- `allowBackup=false`，backup/data transfer 规则排除应用数据。
-
-因此，后续 Codex 域必须拥有独立 pairing identity、密钥 alias、消息类型、counter/重放状态和
-repository。不得把 Codex payload 放入 `encrypted_tap`，也不得把木鱼 partner identity 当作
-Collector identity。
-
-### 当前测试与 CI 基线
-
-- Android JVM 测试源码共 34 个 `@Test`，覆盖 URL/legacy policy、QR、序列化、base64url、
-  ECDH/HKDF/AES-GCM、replay、WebSocket policy、repository 和 pending queue。
-- Cloudflare protocol 单元测试 9/9 通过；Wrangler `4.110.0` dry-run 通过，确认四个 Durable
-  Object bindings 且 `ALLOW_LEGACY=false`。
-- Cloudflare 本地 integration 测试在此环境启动期间被网络/本地绑定审批层取消，不能记为失败
-  或通过。
-- Android Gradle wrapper 没有 executable bit；改用 `bash gradlew` 后，wrapper 下载
-  `gradle-8.11.1-bin.zip` 被当前网络策略拒绝。因此本次未得到新的 unit/lint/debug/release
-  结果，不能沿用历史结果冒充本次通过。
-- 两个 GitHub Actions 工作流分别验证 Android/legacy server 和 Cloudflare relay。仓库中的
-  `VERIFICATION_STATUS.md` 明确说明当前 `main` 在后续合并后尚无一次新的完整 Runner 通过记录；
-  真机、公网、Android 15/16 长运行和生产 alarm close frame 仍需人工验证。
-
-## C1 — Codex Data Source Proof
-
-### 执行环境和版本
-
-| 项目 | 实际值 |
-|---|---|
-| Codex binary | `/opt/codex/bin/codex` |
-| Codex version tested | `codex-cli 0.151.0-alpha.2` |
-| Package target | `x86_64-unknown-linux-musl` |
-| OS tested | Linux x86_64, kernel `6.18.35` |
-| App-server transport inspected | JSON-RPC over `stdio://` |
-| App-server protocol | unversioned initialize handshake + v2 account/thread methods |
-| Exact official source tag commit | `7a85bd1bb4c61c211781c814596fcdeb311107fe` |
-| Official repository HEAD observed | `4110342321bb19b0053190750a0a8b76427b13ad` |
-
-版本和 schema 来自实际二进制：
+C1-LIVE 本轮将进入 C2 的能力拆成三个独立 Gate：
 
 ```text
-/opt/codex/bin/codex --version
-/opt/codex/bin/codex app-server generate-json-schema --experimental --out <temporary-dir>
+G1 QUOTA READ
+G2 TOKEN LEDGER
+G3 RESET OBSERVATION
 ```
 
-生成结果包含 `GetAccountRateLimitsResponse`、`AccountRateLimitsUpdatedNotification`、
-`GetAccountTokenUsageResponse` 和 `ThreadTokenUsageUpdatedNotification`。随后以官方仓库精确 tag
-的源码核对序列化、累加、持久化、恢复和测试语义。未把 `main` 上更新的行为倒灌为当前安装
-版本的能力。
+本轮执行环境无法访问用户实际运行 Codex 且已登录 ChatGPT 的目标电脑，因此不能把用户账户活测升级为 PASS。当前正确状态是：
 
-### A. Quota / rate limit
-
-#### 官方接口
-
-当前二进制正式暴露：
-
-```json
-{ "method": "account/rateLimits/read", "id": 7 }
+```text
+PROBE IMPLEMENTATION: PASS
+LIVE USER ACCOUNT VALIDATION: PENDING
+G1 QUOTA READ: PENDING LIVE USER VALIDATION
+G2 TOKEN LEDGER: PARTIAL
+G3 RESET OBSERVATION: PARTIAL
+READY FOR C2 COLLECTOR MVP: NO
 ```
 
-响应包括：
+其中 G3 不再阻塞 C2。只有 G1、G2、MODEL-FREE MONITORING、SENSITIVE DATA LEAK CHECK，以及 JSONL/Zstd 和 replay/restart 去重测试全部 PASS，才允许后续进入 C2 Collector MVP。
 
-- `rateLimits.primary` / `secondary`：`usedPercent`、可空的 `windowDurationMins`、可空的
-  `resetsAt`（Unix 秒）。
-- `rateLimitsByLimitId`：按 `limitId` 分桶的可空 map；不能假设永远只有一个 Codex bucket。
-- `rateLimitReachedType`：后端分类的额度/工作区限制状态。
-- 可空的 credits、spend control、plan type 等账户 metadata。
-- 可空的 `rateLimitResetCredits`；其中 `availableCount` 是权威数量，`credits == null` 表示只知道
-  数量，空数组表示已取详情但没有可用明细，详情数组还可能被后端截断。
+## 远端基线复核
 
-`account/rateLimits/updated` 是**稀疏滚动更新**。客户端必须把已有字段合并进最近一次 read
-snapshot，或重新 read；更新中的 `null` 不能一律解释成清除旧值。reset-credit 数据只存在于
-read snapshot，不随 updated notification 推送。
+C1-LIVE 开始前重新读取远端状态：
 
-官方 app-server 实现直接通过已登录的 ChatGPT auth client 读取后端 `/api/codex/usage`，并在
-可用时读取 `/api/codex/rate-limit-reset-credits`。API-key 登录不能读取此 ChatGPT quota；没有
-ChatGPT auth 时返回明确 JSON-RPC 错误。该路径不创建模型请求。
+- `main`：`3536e62a6e656b0d7694f061b1365baf49859be6`
+- `feat/codex-usage-integration`：`5ee858b73c8c740998accc5aacb8f5fca3d78188`
+- Draft PR #8 head：`5ee858b73c8c740998accc5aacb8f5fca3d78188`
+- Draft PR #8 base：`main` / `3536e62a6e656b0d7694f061b1365baf49859be6`
+- PR 状态：Open、Draft、未 merge
 
-#### bucket 识别
+因此没有基线漂移；本轮继续在既有 feature branch 和 Draft PR #8 上工作。
 
-不得写死 `primary == 5-hour`、`secondary == weekly`。内部规范化必须优先使用 `limitId` 和
-`windowDurationMins`：
+## C0 — Repository audit 摘要
 
-- 300 分钟可标记为 5-hour window。
-- 10,080 分钟可标记为 weekly window。
-- duration 缺失或未知时保留原始 bucket，UI 不猜名称。
+当前 Android 工程为 Kotlin + Jetpack Compose + Material 3，`minSdk 26`、`compileSdk/targetSdk 36`、JDK 17。现有木鱼配对、加密、relay、DataStore、前台服务和通知边界保持不动。
 
-#### Reset / reset credit
+Codex 域后续必须保持独立身份、密钥、协议消息、counter/replay 状态和 repository，不能把 Codex payload 混入 `encrypted_tap`，也不能复用木鱼 partner identity。
 
-- `resetsAt` 是后端给出的下一次 reset Unix 秒，不是客户端接收时间。
-- 协议没有独立的“reset happened”事件。`CodexResetEvent` 只能由连续 snapshots 观测推导，
-  reason 必须是 `observed` / `unknown`，除非消费 reset credit 的本地操作有明确结果。
-- reset-credit 官方枚举为 `codexRateLimits` / `unknown`；当前没有名为 `bankedReset` 的稳定字段。
-  UI 可显示“reset credits”，不得把未知 credits 擅自改名为 banked resets。
-- 本阶段只读验证没有调用 `account/rateLimitResetCredit/consume`。
+本轮没有进入 Android UI / Room / Navigation / Dashboard / Notification 实现，也没有修改生产 relay。
 
-#### 活体请求结果
+## C1 — 已确认的数据源语义
 
-向实际 app-server 发送 initialize + `account/rateLimits/read` 的只读探针时，进程的外部网络访问
-被当前 Work 执行环境的审批层在返回前取消。没有收到 Codex JSON-RPC success/error payload，
-所以不能确认当前账号实际提供 5h、weekly、reset credits，也不能测试限额耗尽后仍能读取。
+### 1. Quota / rate limit
 
-结论：**QUOTA SOURCE: PARTIAL**。
+当前已确认 app-server 暴露：
 
-### B. Token usage
+```text
+account/rateLimits/read
+account/rateLimits/updated
+```
 
-#### 1. `thread/tokenUsage/updated`
+`account/rateLimits/read` 可提供或可能提供：
 
-通知结构为：
+- `rateLimits.primary` / `secondary`
+- `rateLimitsByLimitId`
+- `usedPercent`
+- `windowDurationMins`
+- `resetsAt`
+- `rateLimitReachedType`
+- 可空 reset-credit metadata
+
+不得写死 `primary == 5-hour`、`secondary == weekly`。识别窗口优先使用 `limitId` 与 `windowDurationMins`：
+
+```text
+300 minutes   -> 5-hour candidate
+10080 minutes -> weekly candidate
+```
+
+缺失字段必须保留 `null`，禁止推测。
+
+`account/rateLimits/updated` 是稀疏更新，不能把 notification 中的 `null` 自动当作清空全部旧状态。
+
+reset credit 当前只能按后端实际字段展示。没有稳定字段证明它等价于名为 `banked reset` 的产品概念时，不得擅自改名。
+
+### 2. Token live notification
+
+当前已确认：
+
+```text
+thread/tokenUsage/updated
+```
+
+通知包含：
 
 ```text
 threadId
 turnId
-tokenUsage.total
 tokenUsage.last
+tokenUsage.total
 tokenUsage.modelContextWindow
 ```
 
-`total` 和 `last` 都包含：
+`last` 表示最近一次上游 completion 新增 usage；`total` 表示 thread 累计 usage。
 
-- `inputTokens`
-- `cachedInputTokens`
-- `cacheWriteInputTokens`
-- `outputTokens`
-- `reasoningOutputTokens`
-- `totalTokens`
-
-源码语义：
-
-- `last` 是最近一次上游 response completion 的新增 usage。
-- `total` 是该 thread 已累加的 usage。
-- 每次上游 completion 可能发生在同一个 turn 内的多轮工具调用之间，因此一个 turn 可有多个
-  token update。
-- `cachedInputTokens` 是 input 的子集，`reasoningOutputTokens` 是 output 的组成/分类；聚合时不得
-  再把它们加到 `totalTokens` 上。
-- resume/fork 可以重放已持久化的最后 snapshot。重放不是新使用，不能把 `last` 再累计一次。
-- rate-limit 更新、context 重新估计等路径也可能触发 TokenCount；官方说明该通知可能是
-  accumulated/estimated/persisted/replayed，不应把每个通知都当作一条唯一账单事件。
-- 通知没有 timestamp、model 或 sessionId。
-
-#### 2. Rollout/session JSONL
-
-当前官方实现把 `EventMsg::TokenCount` 列为可持久化事件。每个 rollout JSONL envelope 由 writer
-增加：
-
-- `timestamp`：写入时的 UTC RFC3339，毫秒精度。
-- 可空 `ordinal`。
-- `type: event_msg` + `payload.type: token_count`。
-
-rollout 的 timestamp 是**本地持久化时间**，不是后端声明的 token 发生时间。它适合做历史排序
-和近似发生时间，但内部 schema 应同时保留 `occurredAt` 可空、`observedAt`/`persistedAt` 明确
-标记来源。
-
-当前 Codex 还会把冷 rollout 压缩为 `.jsonl.zst`。Collector 若只 watch `.jsonl` 会静默漏掉
-历史；必须支持 plain/compressed sibling 选择和文件替换/截断恢复。
-
-rollout 还包含 `turn_started`（可带 Unix 秒 `started_at`）和持久化的 thread settings（含配置
-model），可用于关联；但 token_count payload 本身没有 model。发生 model reroute、缺失 settings
-或关联含糊时，model 必须为 `null`。
-
-#### 3. `account/usage/read`
-
-当前二进制还提供账户级只读接口：
-
-```json
-{ "method": "account/usage/read", "id": 8 }
-{ "method": "account/usage/read", "id": 9, "params": { "threadId": "..." } }
-```
-
-账户结果的 daily buckets 只有 `startDate` 和 `tokens`，可提供官方账户每日总量，但不能还原
-input/cache/output/reasoning 或逐次时间。thread 查询可返回按 model/reasoning effort/speed 分组的
-估算 usage/credits，字段仍可能为 `null`，且不是逐事件 ledger。
-
-#### 4. 不采用的源
-
-- `rawResponse/completed` 虽可带上游精确 usage，但官方标记为 internal-only，需要 thread 的
-  experimental raw events，并且不持久化、不重放；不能作为稳定 Collector API。
-- 不读取 Usage HTML，不 OCR，不模拟点击，不截屏。
-- 不读取、复制或上传 `auth.json`、session cookie、access/refresh token 或 API key。
-- 不解析 prompt、源码、assistant content 或完整 conversation；rollout parser 必须只投影允许的
-  metadata 字段。
-
-#### 活体结果
-
-本 Work 环境的 `/root/.codex/sessions` 没有普通桌面 Codex rollout JSONL；当前会话由 Work 的
-其他状态存储管理。运行中的 app-server control socket也不可由本执行进程访问。因而本次未能对
-真实样本验证：同一 turn 多 completion、Codex 重启、Collector 重启、压缩切换、重复 replay、
-截断文件和损坏尾行。
-
-结论：**TOKEN SOURCE: PARTIAL**。
-
-## 事件与去重语义（C2 的必备约束，不代表已实现）
-
-### 建议规范化模型
+必须保留以下关键语义：
 
 ```text
-CodexUsageEvent
-  id                       stable local identity
-  occurredAt               nullable; source-declared time only
-  observedAt               collector clock
-  persistedAt              nullable rollout envelope time
-  threadId                 nullable only for account aggregates
-  turnId                   nullable
-  sessionId                nullable
-  model                    nullable
-  inputTokens              nullable
-  cachedInputTokens        nullable
-  cacheWriteInputTokens    nullable
-  outputTokens             nullable
-  reasoningTokens          nullable
-  totalTokens              nullable
-  semantics                incremental | cumulative_snapshot | estimated_snapshot
-  source                   app_server_live | rollout_jsonl | account_usage
-  sourceVersion
+1 user turn != 1 token event
 ```
 
-quota 和 token 必须存为不同实体。不得从 token 推导 quota 百分比，也不得把 observed correlation
-称作 OpenAI 官方换算率。
+一个用户 turn 可以发生：
 
-### 去重
+```text
+model -> tool -> model -> tool -> model
+```
 
-- rollout 首选 ID：`SHA-256(sourceVersion + canonicalRolloutIdentity + ordinal + projectedPayload)`；
-  ordinal 缺失时加入 envelope timestamp、文件偏移和 payload hash。
-- 文件 checkpoint 至少保存 canonical path、文件 identity、offset、最后完整行 hash；遇到 shrink、
-  inode/file-id 更换或 plain → zstd 转换时重新核对而非盲目续读。
-- live 通知可能与稍后扫描到的 rollout 是同一 snapshot。跨源合并要比较
-  `(threadId, turnId, total breakdown fingerprint)`，live event 先暂存，rollout 到达后补充
-  persisted timestamp/source identity。
-- 绝不对每个 `total` 求和；优先接受可信的 `last`，同时用前后 `total` 的分项差校验。
-- replayed `last` 不代表新增。相同 cumulative fingerprint 不新增 usage。
-- total 回退可能来自 fork/revert、rollout lineage 或账号切换，不能当负 token；开启新 lineage 或
-  标记 discontinuity。
+因此内部应使用 `usage event` / `completion usage` / `token delta`，不能把每个 `last` 自动命名为“一次 Codex 使用”。
 
-## Reset 检测
+live token notification 本身没有可靠：
 
-只有满足以下条件时才生成“观测到 reset”的候选事件：
+```text
+timestamp
+model
+sessionId
+```
 
-- 同一 account scope、limitId、window duration；
-- snapshot 顺序可证明；
-- `usedPercent` 明显下降，或旧 `resetsAt` 已到且新 `resetsAt` 前移到未来；
-- 排除陈旧 notification、账号切换、bucket 变化和 Collector 时钟倒退。
+所以：
 
-无法区分自然 reset、后端修正和其他原因时，`reason = null/observed`。消费 reset credit 的成功
-响应也必须随后 refetch snapshot，不能自己伪造新的百分比。
+```text
+occurredAt = null
+model = null
+```
 
-## 失败、离线和生命周期语义
+除非某个具体数据源对该 token event 明确声明并可靠归因。
 
-| 场景 | 预期行为 | 本次验证 |
-|---|---|---|
-| Collector 离线 | Android 保留最后 snapshot，明确 stale/offline；只本地算 countdown | 设计确认，未实现 |
-| 网络离线 | quota read 失败；已落盘 rollout 仍可扫描 | 源码确认，未活测 |
-| rate-limit exhausted | 显示 backend reached type 和最后 reset；是否仍可 read 需活测 | 未验证 |
-| Collector restart | 从持久化 checkpoint 恢复并重扫校验，不重复累计 | 未验证 |
-| Codex restart | 发现新/续写 rollout，重新订阅；不得假在线 | 未验证 |
-| duplicate notification | cumulative fingerprint 去重，resume replay 不计新增 | 源码确认，未活测 |
-| malformed JSONL | 忽略未完成尾行，隔离永久坏行并记录 gap | 未验证 |
-| account switch | 分区历史并停止跨账号 delta；不向手机同步账号凭据 | 未验证 |
+不得把当前 Codex 默认模型、thread 初始模型或 UI 当前选择直接复制到 token event。必须考虑 thread 内模型切换、reroute、fallback、resume、fork。
 
-## 数据丢失与稳定性风险
+### 3. Token breakdown invariant
 
-1. App-server v2 方法存在，但 Codex CLI 的 app-server 仍标注 experimental 命令；私有实现字段可能
-   在升级时变化。Collector 必须做版本/schema capability negotiation，未知版本 fail closed。
-2. 一个独立启动的 app-server 不会自动收到另一个 Codex 进程的所有 thread live notifications。
-   全局历史仍需 rollout 扫描或未来正式的账户 ledger。
-3. `account/usage/read` 的 daily buckets 只有总 token，不能补齐逐事件 breakdown。
-4. token notification 无时间和 model；rollout 时间是落盘时间，model 需要关联且可能不可靠。
-5. rollout 是本地内部格式并包含高度敏感的 prompt/源码内容。Collector 必须流式投影白名单字段，
-   禁止复制整行到日志、数据库、relay 或测试 fixture。
-6. `.jsonl.zst`、partial tail、rotation、revert/fork lineage 和 schema upgrade 都会造成 naive tailer
-   漏数或重复。
-7. reset notification 不是独立事件；snapshot 差分只能得到 observed reset。
-8. reset credits 详情可缺失，且明细条数可能小于 availableCount。
-9. 当前版本实测版本是 alpha build；不能承诺跨版本稳定。
+`last` / `total` 的 token breakdown 包括：
 
-## Unsupported / nullable fields
+```text
+inputTokens
+cachedInputTokens
+cacheWriteInputTokens
+outputTokens
+reasoningOutputTokens
+totalTokens
+```
 
-以下字段在统一 schema 中必须允许 `null`，不得用 0、空字符串或推测值代替：
+必须满足：
 
-- token event 的 `occurredAt`、`sessionId`、`model`。
-- 任一缺失的 token breakdown 分项。
-- quota 的 `windowDurationMins`、`resetsAt`、secondary window、limit name。
-- credits balance、monthly limit、plan type、rate-limit reached type。
-- reset-credit 明细、标题、描述、过期时间。
-- reset 原因。
+```text
+cachedInputTokens ⊆ inputTokens
+reasoningOutputTokens ⊆ outputTokens
+```
 
-## 下一步 Gate
+因此总 token 绝不能计算为：
 
-C2 之前必须在用户实际运行 Codex 的目标电脑上，用同一 Codex 版本或明确记录的新版本完成一个
-不含敏感内容的验证夹具：
+```text
+input + cached + output + reasoning
+```
 
-1. 只读调用 `account/rateLimits/read`，记录脱敏 schema、5h/weekly duration、reset timestamp 和
-   reset-credit 可用性。
-2. 在一次已由用户正常发起的 Codex turn 中观察 live token notifications；Collector 不创建 turn。
-3. 仅投影 rollout 的 timestamp/ordinal/token_count/turn boundary/settings metadata，验证 `last`
-   与 `total`。
-4. 覆盖同 turn 多 completion、resume replay、Collector restart、Codex restart、坏尾行、
-   `.jsonl.zst` 和 account switch。
-5. 在接近或达到额度时确认 quota read 是否继续可用。
-6. 连续运行至少一个自然 quota reset 周期，确认 snapshot/updated 合并和 reset 检测。
-7. 保存的 fixture 必须人工检查不含 prompt、源码、路径、邮箱、token、cookie、key 或完整 IDs。
+否则会重复统计 cache 和 reasoning。
 
-只有上述验证使 quota/token 都达到 PASS 后，才能进入 C2。当前按 Gate 要求停止，不创建
-`codex-collector/`，不添加 Android Room、Navigation、Dashboard 或通知代码。
+### 4. Rollout
 
-## 可复核的官方来源
+rollout JSONL 中可持久化 `token_count`。envelope 的 timestamp 是本地持久化时间，只能记作：
 
-- [OpenAI Codex exact tested source tag](https://github.com/openai/codex/tree/7a85bd1bb4c61c211781c814596fcdeb311107fe)
-- [App-server protocol implementation](https://github.com/openai/codex/blob/7a85bd1bb4c61c211781c814596fcdeb311107fe/codex-rs/app-server-protocol/src/protocol/common.rs)
-- [Account protocol types](https://github.com/openai/codex/blob/7a85bd1bb4c61c211781c814596fcdeb311107fe/codex-rs/app-server-protocol/src/protocol/v2/account.rs)
-- [Thread token protocol types](https://github.com/openai/codex/blob/7a85bd1bb4c61c211781c814596fcdeb311107fe/codex-rs/app-server-protocol/src/protocol/v2/thread.rs)
-- [App-server account processor](https://github.com/openai/codex/blob/7a85bd1bb4c61c211781c814596fcdeb311107fe/codex-rs/app-server/src/request_processors/account_processor.rs)
-- [Rollout persistence policy](https://github.com/openai/codex/blob/7a85bd1bb4c61c211781c814596fcdeb311107fe/codex-rs/rollout/src/policy.rs)
-- [Rollout timestamp writer](https://github.com/openai/codex/blob/7a85bd1bb4c61c211781c814596fcdeb311107fe/codex-rs/rollout/src/recorder.rs)
+```text
+persistedAt
+```
+
+不得冒充：
+
+```text
+occurredAt
+```
+
+冷 rollout 可能为：
+
+```text
+*.jsonl
+*.jsonl.zst
+```
+
+因此简单 tail `.jsonl` 会漏历史，不可接受。
+
+rollout 中包含高度敏感内容。验证工具只允许：
+
+```text
+read
+-> parse
+-> allow-list projection
+-> discard original content
+```
+
+不得输出或保存完整 rollout 行。
+
+### 5. `account/usage/read`
+
+当前已确认：
+
+```text
+account/usage/read
+```
+
+它用于账户级 aggregate / reconciliation，不是逐事件 ledger。
+
+允许记录官方 daily bucket 等汇总数据用于诊断，但不能用它静默重写本地事件，也不能从 daily aggregate 反推 input/cache/output/reasoning 分项或精确时间。
+
+## C1-LIVE — Probe Harness
+
+新增严格隔离的验证目录：
+
+```text
+electronic-muyu/tools/codex-live-probe/
+```
+
+明确没有创建：
+
+```text
+electronic-muyu/codex-collector/
+```
+
+因为正式 Collector Gate 尚未通过。
+
+### Probe 允许的 app-server 方法
+
+运行时硬 allow-list：
+
+```text
+initialize
+initialized
+account/rateLimits/read
+account/usage/read
+```
+
+Probe 不会发送：
+
+```text
+thread/start
+turn/start
+account/rateLimitResetCredit/consume
+```
+
+也会拒绝其他非 allow-list RPC。
+
+Probe 不读取或请求：
+
+```text
+OpenAI password
+cookie
+access token
+refresh token
+auth.json
+API key
+production relay secret
+```
+
+### 数据保留白名单
+
+报告与 checkpoint 只允许：
+
+```text
+token metadata
+quota metadata
+opaque SHA-256 truncated IDs
+timestamp metadata
+ordinal
+safe explicit model metadata
+source/probe version
+```
+
+完整以下信息不得进入报告、checkpoint 或 fixture：
+
+```text
+prompt
+assistant response
+source code
+tool output
+conversation text
+auth token
+refresh token
+access token
+cookie
+API key
+email
+full filesystem path
+full threadId
+full turnId
+account identifier
+```
+
+thread / turn / source identity 使用 SHA-256 截断显示 hash。完整 path 仅在进程内瞬时用于打开文件和计算 opaque source hash，不写入结果。
+
+server RPC error 也不保存原始 message/data，只保留方法和数值错误码，避免错误消息夹带路径或账号信息。外部字符串（Codex version、model、timestamp、枚举）使用严格格式白名单；若最终泄漏检测仍发现异常，报告会 fail-closed，只写状态和泄漏类别，不写可疑原值。
+
+### 模型字段策略
+
+live notification 不填 model。
+
+rollout parser 只在 `token_count` 事件本身显式声明 model 时才把该值作为 per-event model 保存。仅在 turn-context 看到 model 不足以证明具体 completion 没有 reroute，因此默认仍保留 `model = null`。
+
+## G2 ledger 算法 invariant
+
+核心 invariant：
+
+```text
+同一个 cumulative snapshot 永远不能产生第二份新增 usage。
+```
+
+以及：
+
+```text
+totalTokens 不允许被连续 total snapshot 相加。
+```
+
+Probe checkpoint 保存已见 cumulative fingerprint；因此即使重启、文件从头 replay、plain/zstd 重扫，也不会再次累计同一 snapshot。
+
+### Case A
+
+```text
+last = 100
+total = 100
+=> added = 100
+```
+
+### Case B
+
+```text
+previous total = 100
+last = 40
+total = 140
+=> added = 40
+```
+
+### Case C — replay
+
+```text
+last = 40
+total = 140
+same cumulative fingerprint already seen
+=> added = 0
+```
+
+### Case D — total-only
+
+```text
+previous total = 140
+total = 200
+last absent
+=> inferred delta = 60
+```
+
+只在线性 lineage、分项不回退时产生 inferred delta，并明确标记 semantics：
+
+```text
+inferred_delta
+```
+
+### Case E — total regression
+
+```text
+200 -> 120
+```
+
+不得产生 `-80`。Probe 标记：
+
+```text
+lineage_discontinuity
+```
+
+并且不生成负 token event。
+
+## Cross-source live ↔ rollout
+
+live 与 rollout 只用安全投影后进行匹配：
+
+```text
+threadHash + cumulative token-breakdown fingerprint
+```
+
+如果实际收到 live notification，并且 rollout 中出现相同 cumulative snapshot，可判定 live ↔ rollout match。
+
+仅扫描到 rollout 不能替代 live notification PASS。
+
+特别是：独立启动的只读 app-server 通常不会自动收到另一个 Codex 进程产生的 thread token notification。因此本轮 Work 环境不会把 rollout 结果冒充 `LIVE TOKEN EVENT`。
+
+## JSONL / Zstd / lifecycle tests
+
+本轮 synthetic tests 不包含用户内容，覆盖：
+
+```text
+plain JSONL
+Zstd JSONL
+plain/Zstd projection equivalence
+truncated final JSON line
+corrupt compressed file
+file replacement
+file shrink
+duplicate replay
+file-offset restart
+ledger restart
+last replay
+Case A-E
+cachedInputTokens subset invariant
+reasoningOutputTokens subset invariant
+ID hashing
+path/content projection leak rejection
+```
+
+本轮验证环境：
+
+```text
+21 tests run
+21 passed
+JSONL synthetic parser: PASS
+JSONL.ZST synthetic parser: PASS
+replay dedup synthetic: PASS
+restart dedup synthetic: PASS
+sensitive projection tests: PASS
+```
+
+Zstd 测试使用可用的标准/模块/`zstd` backend；本轮执行环境存在 `zstd` CLI，因此 synthetic compressed fixture 得到真实压缩/解压验证。
+
+这些 synthetic PASS 证明算法与 parser harness，不等价于用户实际 Codex rollout 已经活测通过。
+
+## File checkpoint / restart
+
+plain JSONL checkpoint 保存：
+
+```text
+opaque source hash
+opaque file identity hash
+offset
+size
+mtime
+```
+
+不保存完整 path。
+
+遇到：
+
+```text
+file identity replacement
+offset > current size
+```
+
+分别标记 replacement / shrink，从安全位置重新扫描，并依靠 cumulative fingerprint 防止旧 snapshot 重复累计。
+
+`.jsonl.zst` 作为冷压缩文件允许 replay-scan；去重仍以 cumulative fingerprint 为最终防线。
+
+## Model-free monitoring 运行时证据
+
+Probe 对一次 quota/usage read 周期记录：
+
+1. 实际 outbound method 列表；
+2. 运行前后 rollout 文件 metadata snapshot；
+3. 是否出现 rollout 改动；
+4. quota/usage RPC 是否成功。
+
+只有在目标电脑实际运行时满足：
+
+```text
+rateLimits/read = PASS
+usage/read = PASS
+outbound RPC 全部在 read-only allow-list
+monitoring window 内没有 Probe 可归因的 rollout side effect
+```
+
+才把：
+
+```text
+MODEL-FREE MONITORING = PASS
+LLM CALLS CAUSED BY MONITORING = 0
+```
+
+本 Work 环境没有用户的实际 Codex 登录运行环境，因此本轮不能仅凭代码阅读把该 C1-LIVE runtime gate 升级为 PASS。
+
+## G1 — Quota Read Gate
+
+目标电脑需要真实验证：
+
+```text
+initialize
+account/rateLimits/read
+account/usage/read
+```
+
+至少记录允许字段：
+
+```text
+primary/secondary or rateLimitsByLimitId
+usedPercent
+windowDurationMins
+resetsAt
+rateLimitReachedType
+reset credit availability when present
+```
+
+字段不存在就保留 `null`。
+
+如果当前用户恰好已达到 rate limit，则额外观察 reached 状态下 `account/rateLimits/read` 是否仍可用。
+
+如果距离额度很远，不允许为测试故意消耗到 100%。此项可保持：
+
+```text
+RATE-LIMIT-EXHAUSTED READ: NOT OBSERVED
+```
+
+且不阻塞 C2。
+
+## G3 — Reset Observation Gate
+
+Probe checkpoint 保留脱敏 quota baseline，可以跨运行比较同一 bucket 的：
+
+```text
+usedPercent
+windowDurationMins
+resetsAt
+```
+
+只有在同 bucket、同 duration、snapshot 顺序可解释，且 `resetsAt` 向后推进并伴随旧边界已到或明显 usage drop 时，才记录观察到 reset。
+
+如果本轮没有自然 reset：
+
+```text
+G3 RESET OBSERVATION: PARTIAL
+```
+
+这不阻塞 C2。
+
+G3 PASS 前不得宣称：
+
+```text
+reset event detection complete
+reset notification correctness complete
+natural vs reset-credit classification complete
+```
+
+weekly natural reset 也不再阻塞基础 Collector MVP。
+
+## C2 进入标准
+
+最低标准：
+
+```text
+G1 QUOTA READ = PASS
+G2 TOKEN LEDGER = PASS
+MODEL-FREE MONITORING = PASS
+SENSITIVE DATA LEAK CHECK = PASS
+JSONL = PASS
+JSONL.ZST = PASS
+REPLAY DEDUP = PASS
+RESTART DEDUP = PASS
+```
+
+允许仍为：
+
+```text
+G3 RESET OBSERVATION = PARTIAL
+RATE-LIMIT-EXHAUSTED READ = NOT OBSERVED
+weekly natural reset = NOT OBSERVED
+reset credit = NOT PRESENT
+```
+
+这些不阻塞 C2，但对应产品能力不能提前宣称完成。
+
+## 当前 C1-LIVE 结果
+
+由于本执行环境不能访问用户实际 Codex 登录目标电脑，本轮最终状态必须保持：
+
+```text
+CODEX VERSION:
+TARGET USER VERSION NOT OBSERVED
+
+G1 QUOTA READ:
+PENDING LIVE USER VALIDATION
+
+RATE LIMIT READ:
+PENDING
+
+RATE LIMIT UPDATED:
+NOT OBSERVED
+
+ACCOUNT USAGE:
+PENDING
+
+5H WINDOW:
+NOT OBSERVED ON TARGET USER ACCOUNT
+
+WEEKLY WINDOW:
+NOT OBSERVED ON TARGET USER ACCOUNT
+
+RESET CREDITS:
+NOT OBSERVED ON TARGET USER ACCOUNT
+
+G2 TOKEN LEDGER:
+PARTIAL
+
+LIVE TOKEN EVENT:
+NOT OBSERVED ON TARGET USER ACCOUNT
+
+ROLLOUT TOKEN EVENT:
+NOT OBSERVED ON TARGET USER ACCOUNT
+
+LIVE ↔ ROLLOUT MATCH:
+NOT OBSERVED
+
+REPLAY DEDUP:
+PASS (synthetic)
+
+RESTART DEDUP:
+PASS (synthetic)
+
+JSONL:
+PASS (synthetic)
+
+JSONL.ZST:
+PASS (synthetic)
+
+SENSITIVE DATA LEAK CHECK:
+PASS (synthetic/report schema)
+
+MODEL-FREE MONITORING:
+PENDING TARGET RUNTIME EVIDENCE
+
+G3 RESET OBSERVATION:
+PARTIAL
+
+READY FOR C2 COLLECTOR MVP:
+NO
+```
+
+## 目标电脑唯一执行入口
+
+Windows，从 `electronic-muyu/` 目录执行：
+
+```powershell
+powershell ./tools/codex-live-probe/run.ps1
+```
+
+预期只在本机生成：
+
+```text
+tools/codex-live-probe/C1_LIVE_RESULT.json
+tools/codex-live-probe/C1_LIVE_RESULT.md
+```
+
+结果文件和 checkpoint 已加入工具目录 `.gitignore`，不得提交真实用户结果。
+
+不需要、也不得提供：
+
+```text
+OpenAI password
+cookie
+access token
+refresh token
+auth.json
+API key
+```
+
+Probe 使用目标电脑 Codex 已有的合法登录环境。
+
+## 已确认的官方来源
+
+前一轮 C1 使用的精确 tested source tag：
+
+- `openai/codex@7a85bd1bb4c61c211781c814596fcdeb311107fe`
+
+相关协议/实现位置：
+
+- `codex-rs/app-server-protocol/src/protocol/common.rs`
+- `codex-rs/app-server-protocol/src/protocol/v2/account.rs`
+- `codex-rs/app-server-protocol/src/protocol/v2/thread.rs`
+- `codex-rs/app-server/src/request_processors/account_processor.rs`
+- `codex-rs/rollout/src/policy.rs`
+- `codex-rs/rollout/src/recorder.rs`
+
+C1-LIVE 实现时再次核对官方 SDK 当前初始化握手仍使用：
+
+```text
+initialize(clientInfo, capabilities)
+initialized
+```
+
+Probe 不依赖读取或导出任何 OpenAI credential。
