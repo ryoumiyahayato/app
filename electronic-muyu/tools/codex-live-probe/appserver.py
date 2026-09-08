@@ -230,10 +230,8 @@ class AppServerClient:
             if isinstance(incoming, Mapping) and str(incoming.get("id")) == request_id:
                 if "error" in incoming:
                     err = incoming.get("error")
-                    if isinstance(err, Mapping):
-                        code = err.get("code")
-                    else:
-                        code = None
+                    raw_code = err.get("code") if isinstance(err, Mapping) else None
+                    code = raw_code if isinstance(raw_code, int) and not isinstance(raw_code, bool) else None
                     raise ProbeError(f"{method} failed: code={code}")
                 return incoming.get("result")
             self._consume_notification(incoming)
@@ -286,7 +284,8 @@ def codex_version(codex_bin: str) -> Optional[str]:
 
 
 def run_quota_probe(codex_bin: str, roots: list[Path], observe_seconds: float) -> dict[str, Any]:
-    before = snapshot_rollout_metadata(roots)
+    # Keep model-free evidence separate from the later user-turn observation.
+    before_reads = snapshot_rollout_metadata(roots)
     result: dict[str, Any] = {
         "rateLimitRead": "FAIL",
         "accountUsage": "FAIL",
@@ -294,6 +293,7 @@ def run_quota_probe(codex_bin: str, roots: list[Path], observe_seconds: float) -
         "quota": None,
         "accountUsageProjection": None,
         "monitoringSideEffectEvidence": "INCONCLUSIVE",
+        "rolloutChangedDuringObservation": False,
         "outboundMethods": [],
         "errorClass": None,
         "liveTokenNotifications": [],
@@ -307,7 +307,15 @@ def run_quota_probe(codex_bin: str, roots: list[Path], observe_seconds: float) -
             raw_usage = client.request("account/usage/read", {})
             result["accountUsageProjection"] = project_account_usage(raw_usage)
             result["accountUsage"] = "PASS"
+
+            after_reads = snapshot_rollout_metadata(roots)
+            result["monitoringSideEffectEvidence"] = (
+                "PASS" if before_reads == after_reads else "CONCURRENT ROLLOUT CHANGE OBSERVED"
+            )
+
             client.observe(observe_seconds)
+            after_observation = snapshot_rollout_metadata(roots)
+            result["rolloutChangedDuringObservation"] = after_observation != after_reads
             if any(x.get("method") == "account/rateLimits/updated" for x in client.notifications):
                 result["rateLimitUpdated"] = "PASS"
             result["liveTokenNotifications"] = [
@@ -319,8 +327,6 @@ def run_quota_probe(codex_bin: str, roots: list[Path], observe_seconds: float) -
     except ProbeError as exc:
         result["errorClass"] = str(exc)[:240]
 
-    after = snapshot_rollout_metadata(roots)
-    result["monitoringSideEffectEvidence"] = "PASS" if before == after else "CONCURRENT ROLLOUT CHANGE OBSERVED"
     allowed_runtime = all(m in READ_ONLY_RPC_METHODS or m == "initialized" for m in result["outboundMethods"])
     result["modelFreeMonitoring"] = (
         "PASS"
@@ -331,4 +337,3 @@ def run_quota_probe(codex_bin: str, roots: list[Path], observe_seconds: float) -
         else "PARTIAL"
     )
     return result
-

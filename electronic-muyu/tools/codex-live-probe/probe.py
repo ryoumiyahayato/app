@@ -54,6 +54,27 @@ def zstd_backend_available() -> bool:
         return shutil.which("zstd") is not None
 
 
+def live_event_has_positive_new_usage(event: Mapping[str, Any]) -> bool:
+    """Return True only for a live notification that added positive, non-replayed usage."""
+    ledger = event.get("ledger")
+    if not isinstance(ledger, Mapping):
+        return False
+    if ledger.get("duplicate") is True or ledger.get("lineageDiscontinuity") is True:
+        return False
+    added = TokenBreakdown.from_mapping(ledger.get("added"))
+    return added is not None and (added.totalTokens or 0) > 0
+
+
+def live_event_cumulative_key(event: Mapping[str, Any]) -> Optional[tuple[str, str]]:
+    if not live_event_has_positive_new_usage(event):
+        return None
+    total = TokenBreakdown.from_mapping(event.get("total"))
+    thread_hash = nullable_string(event.get("threadHash"), 64)
+    if total is None or not thread_hash:
+        return None
+    return (thread_hash, total.fingerprint())
+
+
 def live_command(args: argparse.Namespace) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -75,6 +96,7 @@ def live_command(args: argparse.Namespace) -> int:
             "quota": None,
             "accountUsageProjection": None,
             "monitoringSideEffectEvidence": "INCONCLUSIVE",
+            "rolloutChangedDuringObservation": False,
             "outboundMethods": [],
             "modelFreeMonitoring": "PARTIAL",
             "errorClass": "Codex executable not found",
@@ -103,12 +125,13 @@ def live_command(args: argparse.Namespace) -> int:
     replay_dedup = "PASS" if self_tests["pass"] else "FAIL"
     restart_dedup = "PASS" if self_tests["pass"] else "FAIL"
 
-    live_token_status = "PASS" if live_events else "NOT OBSERVED"
+    positive_live_events = [event for event in live_events if live_event_has_positive_new_usage(event)]
+    live_token_status = "PASS" if positive_live_events else "NOT OBSERVED"
     live_keys: set[tuple[str, str]] = set()
-    for live in live_events:
-        total = TokenBreakdown.from_mapping(live.get("total"))
-        if total is not None:
-            live_keys.add((str(live.get("threadHash")), total.fingerprint()))
+    for live in positive_live_events:
+        key = live_event_cumulative_key(live)
+        if key is not None:
+            live_keys.add(key)
     rollout_keys: set[tuple[str, str]] = set()
     for event in events:
         total = TokenBreakdown.from_mapping(event.get("total"))
