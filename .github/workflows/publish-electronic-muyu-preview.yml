@@ -1,0 +1,114 @@
+name: Publish Electronic Muyu preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/publish-electronic-muyu-preview.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: electronic-muyu-preview-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android API 36
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Set up Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Read app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION_NAME="$(sed -n 's/^[[:space:]]*versionName = "\([^"]*\)".*/\1/p' electronic-muyu/app/build.gradle.kts | head -n 1)"
+          if [ -z "$VERSION_NAME" ]; then
+            echo "Unable to read versionName from app/build.gradle.kts" >&2
+            exit 1
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=electronic-muyu-v${VERSION_NAME}-preview" >> "$GITHUB_ENV"
+          echo "APK_NAME=electronic-muyu-${VERSION_NAME}-preview.apk" >> "$GITHUB_ENV"
+
+      - name: Build installable preview APK
+        working-directory: electronic-muyu
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Prepare release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp electronic-muyu/app/build/outputs/apk/debug/app-debug.apk "dist/$APK_NAME"
+          (
+            cd dist
+            sha256sum "$APK_NAME" > "$APK_NAME.sha256"
+          )
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: electronic-muyu-${{ env.VERSION_NAME }}-preview
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            dist/${{ env.APK_NAME }}
+            dist/${{ env.APK_NAME }}.sha256
+
+      - name: Publish GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+
+          cat > release-notes.md <<EOF
+          ## Electronic Muyu ${VERSION_NAME} preview
+
+          This is a **preview/testing APK** built from the current `main` branch.
+
+          - Directly installable Android APK.
+          - Debug-signed so the app keeps its development Relay override capability.
+          - Not a production-signed release.
+          - A later preview built on another runner may require uninstalling the previous preview before installation.
+          - The SHA-256 checksum is attached next to the APK.
+
+          Production publishing should use a persistent private signing key and an explicit HTTPS production Relay URL.
+          EOF
+
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Electronic Muyu ${VERSION_NAME} Preview" \
+            --notes-file release-notes.md \
+            --prerelease \
+            "dist/$APK_NAME" \
+            "dist/$APK_NAME.sha256"
