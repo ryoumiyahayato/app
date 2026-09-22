@@ -1,0 +1,5 @@
+C1_LIVE_RESULT.json
+C1_LIVE_RESULT.md
+.c1_live_checkpoint.json
+__pycache__/
+tests/__pycache__/
